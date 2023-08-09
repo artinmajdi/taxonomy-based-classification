@@ -1,6 +1,7 @@
 import argparse
 import concurrent.futures
 import contextlib
+import enum
 import itertools
 import json
 import multiprocessing
@@ -14,7 +15,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
-import torch
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -22,13 +22,13 @@ import pingouin as pg
 import plotly.graph_objs as go
 import seaborn as sns
 import sklearn
+import torch
 import torchvision
+import umap
 from hyperopt import fmin, hp, tpe
 from matplotlib import pyplot as plt
 from scipy import stats
 from tqdm import tqdm
-import umap
-from enum import Enum
 
 import torchxrayvision as xrv
 
@@ -44,16 +44,33 @@ class System:
 		print('torch:' , torch.cuda.device_count())
 		return [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
 
-ExperimentSTAGE = Enum('ExperimentSTAGE', ['ORIGINAL', 'NEW'])
+@enum.unique
+class ExperimentSTAGE(enum.Enum):
+	ORIGINAL = 'ORIGINAL'
+	NEW      = 'NEW'
+
+@enum.unique
+class DatasetList(enum.Enum):
+	PC   = 'PC'
+	NIH  = 'NIH'
+	CheX = 'CheX'
+
+@enum.unique
+class ThreshTechList(enum.Enum):
+	DEFAULT          = 'DEFAULT'
+	ROC              = 'ROC'
+	PRECISION_RECALL = 'PRECISION_RECALL'
+
+
 
 class Findings:
 
 	list_metrics   = ['AUC'    , 'ACC' , 'F1'   , 'Threshold']
 	list_arguments = ['metrics', 'pred', 'logit', 'truth'     , 'loss']
 
-	def __init__(self, pathologies, exp_stage): # type: (List[str], str) -> None
+	def __init__(self, pathologies, experiment_stage: str):
 
-		self.experiment_stage = ExperimentSTAGE[exp_stage]
+		self.experiment_stage = ExperimentSTAGE[experiment_stage.upper()]
 		self.pathologies        : List[str] = pathologies
 
 		# Initializing Metrics & Thresholds
@@ -113,9 +130,9 @@ class Labels:
 
 class Data:
 
-	data_loader: torch.utils.data.DataLoader
-	list_thresh_techniques = ['default', 'ROC', 'Precision_Recall']
-	list_datasets = ['PC', 'NIH', 'CheX']
+	data_loader: torch.utils.data.DataLoader = None
+	list_thresh_techniques = ThreshTechList
+	list_datasets = DatasetList
 
 	def __init__(self, data_mode: str='train'):
 
@@ -146,10 +163,10 @@ class Data:
 	def list_nodes_thresh_techniques(self) -> List[List[str]]:
 		return [[node, thresh] for thresh in Data.list_thresh_techniques for node in self.labels.list_nodes_impacted]  if len(self.labels.list_nodes_impacted) else []
 
-	def initialize_findings(self, pathologies, experiment_stage):
-		setattr( self, experiment_stage.upper(), Findings( exp_stage=experiment_stage.upper(), pathologies=pathologies ) )
+	def initialize_findings(self, pathologies: list[str], experiment_stage: str):
+		setattr(self, experiment_stage, Findings(experiment_stage=experiment_stage, pathologies=pathologies))
 
-		self.list_findings_names.append(experiment_stage.upper())
+		self.list_findings_names.append(experiment_stage)
 
 class Hierarchy:
 
@@ -253,7 +270,7 @@ class Hierarchy:
 		return child_data, parent_data
 
 	@staticmethod
-	def get_findings_for_node(G, node, thresh_technique, WHICH_RESULTS): # type: (nx.DiGraph, str, str, str) -> Hierarchy.OUTPUT
+	def get_findings_for_node(G, node, thresh_technique, WHICH_RESULTS): # type: (nx.DiGraph, str, str, ExperimentSTAGE) -> Hierarchy.OUTPUT
 
 		WR = WHICH_RESULTS
 		TT = thresh_technique
@@ -312,10 +329,10 @@ class Hierarchy:
 
 		UT = defaultdict(list)
 
-		# Looping through all parent classes in the default taxonomy
+		# Looping through all parent classes in the DEFAULT taxonomy
 		for parent in Hierarchy.taxonomy_structure.keys():
 
-			# Check if the parent class of our default taxonomy exist in the dataset
+			# Check if the parent class of our DEFAULT taxonomy exist in the dataset
 			if parent in classes:
 				for child in Hierarchy.taxonomy_structure[parent]:
 
@@ -424,10 +441,7 @@ class SaveFigure:
 		self.path    = self.config.local_path.joinpath(path)
 
 	def load(self):
-		if self.path.exists():
-			return plt.imread(self.path)
-
-		return None
+		return plt.imread(self.path) if self.path.exists() else None
 
 	def dump(self):
 		self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -884,6 +898,7 @@ class LoadModelXRV:
 		""" 224x224 models """
 		model_name = self.model_name
 
+		
 		get_model = lambda pre_trained_model_weights: xrv.models.DenseNet( weights=pre_trained_model_weights, apply_sigmoid=False )
 
 		if   model_name == 'NIH'      : model = get_model('densenet121-res224-nih')
@@ -961,7 +976,7 @@ class LoadModelXRV:
 			feats = model.features2(images) if hasattr(model, "features2") else model.features(images)
 			return feats.reshape(len(feats),-1).detach().cpu(), batch_data["lab" ].to(device).detach().cpu()
 
-		def looping_over_all_batches(data_loader, n_batches_to_process) -> Tuple[np.ndarray, np.ndarray, list]:
+		def looping_over_all_batches(data_loader, n_batches_to_process) -> Tuple[np.ndarray, np.ndarray]:
 
 			d_features, d_truth  = [], []
 			for batch_idx, batch_data in enumerate(tqdm(data_loader)):
@@ -1317,7 +1332,7 @@ class HyperParameterTuning:
 		return {th: pd.DataFrame( {n:dict(a=a,b=b) for n in self.model.pathologies} ) for th in Data.list_thresh_techniques}
 
 	@staticmethod
-	def calculate_per_node(data, config, hyperparameters, node, thresh_technique='default'): # type: (Data, argparse.Namespace, Dict[str, pd.DataFrame], str, str) -> List[float]
+	def calculate_per_node(data: Data, config: argparse.Namespace, hyperparameters: Dict[str, pd.DataFrame], node: str, thresh_technique: ThreshTechList=ThreshTechList.DEFAULT) -> List[float]:
 
 		def objective_function(args: Dict[str, float], hp_in) -> float:
 
@@ -1402,7 +1417,7 @@ class HyperParameterTuning:
 
 	def do_calculate(self):
 
-		if self.config.do_hyperparameters == 'default':
+		if self.config.do_hyperparameters == 'DEFAULT':
 			self.hyperparameters = self.initial_hyperparameters()
 		else:
 			self.hyperparameters = HyperParameterTuning.calculate(initial_hp=deepcopy(self.initial_hyperparameters()), config=self.config, data=self.data)
@@ -1420,7 +1435,7 @@ class HyperParameterTuning:
 		# Initializing the class
 		HP = cls(config=config, data=data , model=model)
 
-		if config.do_hyperparameters in ('default' ,'calculate'):
+		if config.do_hyperparameters in ('DEFAULT' ,'calculate'):
 			HP.do_calculate()
 		else:
 			HP.hyperparameters = LoadSaveFindings(config, HP.save_path_full).load(source=config.do_hyperparameters, run_name=config.MLFlow_run_name)
@@ -1432,15 +1447,15 @@ class HyperParameterTuning:
 
 
 def deserialize_object(state, cls):
-    obj = cls.__new__(cls)
-    for attr, value in state.items():
-        if isinstance(value, dict) and 'pred' in value:
-            setattr(obj, attr, pd.DataFrame.from_dict(value))
-        elif isinstance(value, dict):
-            setattr(obj, attr, deserialize_object(value, globals()[attr]))
-        else:
-            setattr(obj, attr, value)
-    return obj
+	obj = cls.__new__(cls)
+	for attr, value in state.items():
+		if isinstance(value, dict) and 'pred' in value:
+			setattr(obj, attr, pd.DataFrame.from_dict(value))
+		elif isinstance(value, dict):
+			setattr(obj, attr, deserialize_object(value, globals()[attr]))
+		else:
+			setattr(obj, attr, value)
+	return obj
 
 
 @dataclass(init=False)
@@ -1646,21 +1661,21 @@ class MetricsAllTechniques:
 
 @dataclass
 class MetricsAllTechniquesThresholds:
-	default: 		  MetricsAllTechniques
+	DEFAULT: 		  MetricsAllTechniques
 	ROC: 			  MetricsAllTechniques
-	Precision_Recall: MetricsAllTechniques
+	PRECISION_RECALL: MetricsAllTechniques
 
 
 class AIM1_1_TorchXrayVision():
 
-	def __init__(self, config, seed = 10): # type: (argparse.Namespace, int) -> None
+	def __init__(self, config: argparse.Namespace, seed: int=10):
 
 		self.hyperparameters = None
-		self.config    : argparse.Namespace                  = config
-		self.train     : Optional[Data]                      = None
-		self.test      : Optional[Data]                      = None
-		self.model     : Optional[torch.nn.Module]           = None
-		self.d_data    : Optional[xrv.datasets.CheX_Dataset] = None
+		self.config         : argparse.Namespace                  = config
+		self.train          : Optional[Data]                      = None
+		self.test           : Optional[Data]                      = None
+		self.model          : Optional[torch.nn.Module]           = None
+		self.d_data         : Optional[xrv.datasets.CheX_Dataset] = None
 
 		approach = config.approach if hasattr(config, 'approach') else 'loss'
 		self.save_path : str = f'details/{config.MLFlow_run_name}/{approach}'
@@ -1691,12 +1706,15 @@ class AIM1_1_TorchXrayVision():
 
 		data = self.train if data_mode == 'train' else self.test
 
+		exp_stage_list   = [ExperimentSTAGE.ORIGINAL.name       , ExperimentSTAGE.NEW.name]
+		thresh_tech_list = [ThreshTechList.PRECISION_RECALL.name, ThreshTechList.ROC.name]
+		
 		df = pd.DataFrame(  index=data.ORIGINAL.threshold.index ,
-							columns=pd.MultiIndex.from_product( [['Precision_Recall' , 'ROC'],[ExperimentSTAGE.ORIGINAL,ExperimentSTAGE.NEW]] ) )
+							columns=pd.MultiIndex.from_product([thresh_tech_list, exp_stage_list]) )
 
-		for th_tqn in ['ROC' , 'Precision_Recall']:
-			df[ (th_tqn,ExperimentSTAGE.ORIGINAL) ] = data.ORIGINAL.threshold[th_tqn]
-			df[ (th_tqn,ExperimentSTAGE.NEW     ) ] = data.NEW     .threshold[th_tqn]
+		for th_tqn in ['ROC' , 'PRECISION_RECALL']:
+			df[ (th_tqn,ExperimentSTAGE.ORIGINAL.name) ] = data.ORIGINAL.threshold[th_tqn]
+			df[ (th_tqn,ExperimentSTAGE.NEW.name     ) ] = data.NEW     .threshold[th_tqn]
 
 		return df.replace(np.nan, '')
 
@@ -1779,14 +1797,14 @@ class AIM1_1_TorchXrayVision():
 
 		def calculating_optimal_Thresholds(y, yhat, x):
 
-			if x == 'default':
+			if x == 'DEFAULT':
 				findings.metrics[x,node]['Threshold'] = 0.5
 
 			if x == 'ROC':
 				fpr, tpr, th = sklearn.metrics.roc_curve(y, yhat)
 				findings.metrics[x,node]['Threshold'] = th[np.argmax( tpr - fpr )]
 
-			if x == 'Precision_Recall':
+			if x == 'PRECISION_RECALL':
 				ppv, recall, th = sklearn.metrics.precision_recall_curve(y, yhat)
 				f_score = 2 * (ppv * recall) / (ppv + recall)
 				findings.metrics[x,node]['Threshold'] = th[np.argmax( f_score )]
@@ -1901,19 +1919,22 @@ class AIM1_1_TorchXrayVision():
 
 	@staticmethod
 	def loop_run_full_experiment():
-		for dataset_name in Data.list_datasets:
+		for dataset_name in DatasetList:
 			for approach in ['logit', 'loss']:
-				AIM1_1_TorchXrayVision.run_full_experiment(approach=approach, dataset_name=dataset_name)
+				AIM1_1_TorchXrayVision.run_full_experiment(approach=approach, dataset_name=dataset_name.name)
 
 	@classmethod
-	def get_merged_data(cls, data_mode='test', approach='logit', thresh_technique='default', datasets_list=['CheX', 'NIH', 'PC']): # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
+	def get_merged_data(cls, data_mode='test', approach='logit', thresh_technique='DEFAULT', datasets_list=None): # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
 
-		def get(method): # type: (str) -> DataMerged
+		if datasets_list is None:
+			datasets_list = DatasetList
+			
+		def get(method: ExperimentSTAGE) -> DataMerged:
 			data = defaultdict(list)
 			for dataset_name in datasets_list:
 				a1 = cls.run_full_experiment(approach=approach, dataset_name=dataset_name)
 
-				metric = getattr( getattr(a1,data_mode),method)
+				metric = getattr( getattr(a1,data_mode),method.value)
 				data['pred'].append(metric.pred[thresh_technique] if method==ExperimentSTAGE.NEW else metric.pred)
 				data['truth'].append(metric.truth)
 				data['yhat'].append(data['pred'][-1] >= metric.metrics[thresh_technique].T['Threshold'].T )
@@ -1927,7 +1948,7 @@ class AIM1_1_TorchXrayVision():
 		return baseline, proposed
 
 	@classmethod
-	def get_all_metrics(cls, datasets_list=['CheX', 'NIH', 'PC'], data_mode='test', thresh_technique='default', jupyter=True, **kwargs): # type: (list, str, str, bool, dict) -> MetricsAllTechniques
+	def get_all_metrics(cls, datasets_list=['CheX', 'NIH', 'PC'], data_mode='test', thresh_technique='DEFAULT', jupyter=True, **kwargs): # type: (list, str, str, bool, dict) -> MetricsAllTechniques
 
 		config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
 		save_path = pathlib.Path(f'tables/metrics_all_datasets/{thresh_technique}')
@@ -2008,7 +2029,7 @@ class AIM1_1_TorchXrayVision():
 	def get_all_metrics_all_thresh_techniques(cls, datasets_list: list[str]=['CheX', 'NIH', 'PC'], data_mode: str='test') -> MetricsAllTechniquesThresholds:
 
 		output = {}
-		for x in tqdm(['default', 'ROC', 'Precision_Recall']):
+		for x in tqdm(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
 			output[x] = AIM1_1_TorchXrayVision.get_all_metrics(datasets_list=datasets_list, data_mode=data_mode, thresh_technique=x)
 
 		return MetricsAllTechniquesThresholds(**output)
@@ -2036,7 +2057,7 @@ class AIM1_1_TorchXrayVision():
 			elif check_what == 'd_data': 	 return DT.d_data
 			elif check_what == 'show_graph': DT.train.Hierarchy_cls.show(package=kwargs['package'])
 
-	def visualize(self, data_mode='test', thresh_technique='default', **kwargs):
+	def visualize(self, data_mode='test', thresh_technique='DEFAULT', **kwargs):
 		assert data_mode in ('train', 'test')
 		assert thresh_technique in Data.list_thresh_techniques
 		return Visualize(data=getattr(self, data_mode), thresh_technique=thresh_technique, config=self.config, **kwargs)
@@ -2065,7 +2086,7 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 					dict(name = 'max_sample'  , type = int, help = 'Maximum number of samples to load' ),
 
 					# Model
-                    dict(name='model_name'   , type=str , help='Name of the pre_trained model.' ),
+					dict(name='model_name'   , type=str , help='Name of the pre_trained model.' ),
 					dict(name='architecture' , type=str , help='Name of the architecture'       ),
 
 					# Training
@@ -2085,7 +2106,7 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 					dict(name='KILL_MLFlow_at_END'    , type=bool  , help='Kill MLFlow'                                            ),
 
 					# Config
-					dict(name='config'                , type=str   , help='Path to config file' , default='config.json'             ),
+					dict(name='config'                , type=str   , help='Path to config file' , DEFAULT='config.json'             ),
 					]
 
 		# Initializing the parser
@@ -2093,7 +2114,7 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 
 		# Adding arguments
 		for g in args_list:
-			parser.add_argument(f'--{g["name"].replace("_","-")}', type=g['type'], help=g['help'], default=g.get('default')) # type: ignore
+			parser.add_argument(f'--{g["name"].replace("_","-")}', type=g['type'], help=g['help'], DEFAULT=g.get('DEFAULT')) # type: ignore
 
 		# Filter out any arguments starting with '-f'
 		filtered_argv = [arg for arg in args if not (arg.startswith('-f') or 'jupyter/runtime' in arg.lower())]
@@ -2145,7 +2166,7 @@ class Tables:
 	def __init__(self, jupyter=True, **kwargs):
 		self.config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
 
-	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode='test', thresh_technique='default'):
+	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode='test', thresh_technique='DEFAULT'):
 
 		save_path = self.config.local_path.joinpath(f'tables/metrics_per_dataset/{thresh_technique}/metrics_{data_mode}.xlsx')
 
@@ -2359,7 +2380,7 @@ class Visualize:
 		def get_metrics():
 			columns = pd.MultiIndex.from_product( [['ACC', 'AUC', 'F1'], ['baseline', 'loss', 'logit']])
 			metric_df = {}
-			for thresh_technique in ['default', 'ROC', 'Precision_Recall']:
+			for thresh_technique in ['DEFAULT', 'ROC', 'PRECISION_RECALL']:
 				output = AIM1_1_TorchXrayVision.get_all_metrics(datasets_list=['CheX', 'NIH', 'PC'], data_mode='test', thresh_technique=thresh_technique)
 				metric_df[thresh_technique] = pd.DataFrame(columns=columns)
 				for metric in ['ACC', 'AUC', 'F1']:
@@ -2374,7 +2395,7 @@ class Visualize:
 			sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True, rc=None)
 
 			params = dict(legend=False, fontsize=16, kind='barh')
-			for i, thresh_technique in enumerate(['default', 'ROC', 'Precision_Recall']):
+			for i, thresh_technique in enumerate(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
 				metric_df[thresh_technique]['ACC'].plot(ax=axes[i,0], xlabel='ACC', ylabel=thresh_technique, **params)
 				metric_df[thresh_technique]['AUC'].plot(ax=axes[i,1], xlabel='AUC', ylabel=thresh_technique, **params)
 				metric_df[thresh_technique]['F1' ].plot(ax=axes[i,2], xlabel='F1' , ylabel=thresh_technique, **params)
