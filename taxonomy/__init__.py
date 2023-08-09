@@ -1,3 +1,3 @@
-from . import utils_taxonomy as utils
+from . import utils
 
-__all__ = ['utils']
+from ._version import __version__

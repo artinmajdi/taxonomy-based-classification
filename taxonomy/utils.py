@@ -1,39 +1,36 @@
 import argparse
+import concurrent.futures
+import contextlib
+import itertools
 import json
+import multiprocessing
 import os
 import pathlib
 import pickle
 import resource
 import sys
-import warnings
 from collections import defaultdict
 from copy import deepcopy
-from typing import Any, Dict, List, Optional, Tuple, Union, NamedTuple
-import itertools
-import multiprocessing
-from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
-import concurrent.futures
-import contextlib
-
-import mlflow
+import torch
 import networkx as nx
 import numpy as np
 import pandas as pd
-import sklearn
-import torch
-import torchvision
-import torchxrayvision as xrv
-from hyperopt import fmin, hp, tpe  # , MangoTrials, mongoexp
-from matplotlib import pyplot as plt
-from sklearn import metrics as sk_metrics
-from tqdm import tqdm
-from dataclasses import dataclass
-import matplotlib.pyplot as plt
+import pingouin as pg
+import plotly.graph_objs as go
 import seaborn as sns
-from sklearn.metrics import roc_curve, auc
+import sklearn
+import torchvision
+from hyperopt import fmin, hp, tpe
+from matplotlib import pyplot as plt
+from scipy import stats
+from tqdm import tqdm
+import umap
+from enum import Enum
 
-from main.utils.utils_mlflow import MLFLOW_SETUP
+import torchxrayvision as xrv
 
 # region
 USE_CUDA = torch.cuda.is_available()
@@ -44,19 +41,19 @@ class System:
 
 	@property
 	def list_physical_devices(self):
-		import torch
-		import tensorflow as tf
 		print('torch:' , torch.cuda.device_count())
-		return tf.config.list_physical_devices()
+		return [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+
+ExperimentSTAGE = Enum('ExperimentSTAGE', ['ORIGINAL', 'NEW'])
 
 class Findings:
 
 	list_metrics   = ['AUC'    , 'ACC' , 'F1'   , 'Threshold']
 	list_arguments = ['metrics', 'pred', 'logit', 'truth'     , 'loss']
 
-	def __init__(self, pathologies, experiment_stage): # type: (List[str], str) -> None
+	def __init__(self, pathologies, exp_stage): # type: (List[str], str) -> None
 
-		self.experiment_stage   : str       = experiment_stage.upper()
+		self.experiment_stage = ExperimentSTAGE[exp_stage]
 		self.pathologies        : List[str] = pathologies
 
 		# Initializing Metrics & Thresholds
@@ -66,13 +63,13 @@ class Findings:
 		# Initializing Arguments & Findings
 		self.truth = pd.DataFrame(columns=pathologies)
 
-		if self.experiment_stage == 'ORIGINAL':
+		if self.experiment_stage == ExperimentSTAGE.ORIGINAL:
 			self.pred     = pd.DataFrame(columns=pathologies)
 			self.logit    = pd.DataFrame(columns=pathologies)
 			self.loss     = pd.DataFrame(columns=pathologies)
 			self._results = { key : getattr( self, key ) for key in Findings.list_arguments }
 
-		elif self.experiment_stage == 'NEW':
+		elif self.experiment_stage == ExperimentSTAGE.NEW:
 			self.pred              = pd.DataFrame( columns=columns )
 			self.logit             = pd.DataFrame( columns=columns )
 			self.loss              = pd.DataFrame( columns=columns )
@@ -91,7 +88,7 @@ class Findings:
 			for key in Findings.list_arguments:
 				setattr(self, key, value[key])
 
-			if self.experiment_stage == 'NEW':
+			if self.experiment_stage == ExperimentSTAGE.NEW:
 				setattr(self, 'hierarchy_penalty', value['hierarchy_penalty'])
 
 class Labels:
@@ -150,7 +147,7 @@ class Data:
 		return [[node, thresh] for thresh in Data.list_thresh_techniques for node in self.labels.list_nodes_impacted]  if len(self.labels.list_nodes_impacted) else []
 
 	def initialize_findings(self, pathologies, experiment_stage):
-		setattr(self, experiment_stage.upper(), Findings(experiment_stage=experiment_stage.upper(), pathologies=pathologies))
+		setattr( self, experiment_stage.upper(), Findings( exp_stage=experiment_stage.upper(), pathologies=pathologies ) )
 
 		self.list_findings_names.append(experiment_stage.upper())
 
@@ -209,7 +206,7 @@ class Hierarchy:
 					metrics[x] = findings['metrics'][x, n]
 
 				# Adding the findings to the graph node
-				self.G.nodes[n]['ORIGINAL'] = dict( data=data, metrics=metrics )
+				self.G.nodes[n][ExperimentSTAGE.ORIGINAL] = dict( data=data, metrics=metrics )
 
 		def graph_add_findings_new_to_nodes(findings: dict):
 
@@ -225,7 +222,7 @@ class Hierarchy:
 					hierarchy_penalty[x] = findings['hierarchy_penalty'][x, n].values
 
 				# Adding the findings to the graph node
-				self.G.nodes[n]['NEW'] = dict( data=data, metrics=metrics )
+				self.G.nodes[n][ExperimentSTAGE.NEW] = dict( data=data, metrics=metrics )
 
 				# Updating the graph with the hierarchy_penalty for the current node
 				self.G.nodes[n]['hierarchy_penalty'] = hierarchy_penalty
@@ -247,11 +244,11 @@ class Hierarchy:
 	def get_node_original_results_for_child_and_parent_nodes(G, node, thresh_technique='ROC'): # type: (nx.DiGraph, str, str) -> Tuple[Dict[str, Any], Dict[str, Any]]
 
 		# The predicted probability p ,  true label y, optimum threshold th, and loss for node class
-		child_data =Hierarchy.get_findings_for_node(G=G , node=node, thresh_technique=thresh_technique, WHICH_RESULTS='ORIGINAL')
+		child_data =Hierarchy.get_findings_for_node(G=G , node=node, thresh_technique=thresh_technique, WHICH_RESULTS=ExperimentSTAGE.ORIGINAL)
 
 		# The predicted probability p ,  true label y, optimum threshold th, and loss for parent class
 		parent_node = Hierarchy.get_parent_node(G=G , node=node)
-		parent_data = Hierarchy.get_findings_for_node( G=G , node=parent_node , thresh_technique=thresh_technique, WHICH_RESULTS='ORIGINAL') if parent_node else None
+		parent_data = Hierarchy.get_findings_for_node( G=G , node=parent_node , thresh_technique=thresh_technique, WHICH_RESULTS=ExperimentSTAGE.ORIGINAL) if parent_node else None
 
 		return child_data, parent_data
 
@@ -263,11 +260,11 @@ class Hierarchy:
 
 		node_data = G.nodes[node]
 
-		if WR == 'ORIGINAL':
+		if WR == ExperimentSTAGE.ORIGINAL:
 			data    = node_data[WR]['data'   ]
 			metrics = node_data[WR]['metrics'][TT]
 			hierarchy_penalty  = None
-		elif WR == 'NEW':
+		elif WR == ExperimentSTAGE.NEW:
 			data    = node_data[WR]['data'   ][TT]
 			metrics = node_data[WR]['metrics'][TT]
 			hierarchy_penalty  = node_data['hierarchy_penalty']
@@ -337,8 +334,6 @@ class Hierarchy:
 		return df
 
 	def show(self, package='networkx', **kwargs):
-		import plotly.graph_objs as go
-		import seaborn as sns
 
 		def plot_networkx_digraph(G):
 			pos = nx.spring_layout( G )
@@ -442,11 +437,8 @@ class SaveFigure:
 			path = self.path.with_suffix(f'.{format}')
 			plt.savefig(path, format=format, dpi=300)
 
-			if self.config.RUN_MLFlow:
-				mlflow.log_artifact(local_path=path, artifact_path=self.config.artifact_path)
-
 class LoadSaveFindings:
-	def __init__(self, config, relative_path='sth.pkl'):
+	def __init__(self, config, relative_path: Union[str, pathlib.Path]='sth.pkl'):
 		""" relative_path can be one of [findings_original , findings_new, hyperparameters.pkl]"""
 
 		self.config   = config
@@ -456,15 +448,7 @@ class LoadSaveFindings:
 	def save(self, data, **kwargs):
 		SaveFile(self.path).dump(data, **kwargs)
 
-		if self.config.RUN_MLFlow:
-			mlflow.log_artifact(local_path=self.path, artifact_path=self.config.artifact_path)
-
 	def load(self, source='load_MLFlow', run_name=None, run_id=None, **kwargs):
-
-		if source == 'load_MLFlow':
-			MS = MLFLOW_SETUP(experiment_name=self.config.experiment_name)
-			MS.download_artifacts(run_id=run_id, run_name=run_name, local_path=self.config.local_path.as_posix(), artifact_name=self.relative_path)
-
 		return SaveFile(self.path).load(**kwargs)
 
 	# def save_figure(self):
@@ -1008,7 +992,7 @@ class CalculateOriginalFindings:
 		self.config               = config
 		self.save_path_full       = f'details/{config.MLFlow_run_name}/baseline/findings_original_{data.data_mode}.pkl'
 
-		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage='ORIGINAL')
+		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage=ExperimentSTAGE.ORIGINAL)
 		self.data = data
 
 	@staticmethod
@@ -1122,7 +1106,7 @@ class CalculateNewFindings:
 
 		self.model            = model
 		self.hyperparameters  = hyperparameters
-		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage='NEW')
+		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage=ExperimentSTAGE.NEW)
 		self.data             = data
 		config.approach       = approach
 		self.config           = config
@@ -1156,7 +1140,7 @@ class CalculateNewFindings:
 				return hierarchy_penalty.to_numpy()
 
 			# Getting the parent data
-			pdata = Hierarchy.get_findings_for_node(G=G, node=parent_node, WHICH_RESULTS='ORIGINAL', thresh_technique=thresh_technique)
+			pdata = Hierarchy.get_findings_for_node(G=G, node=parent_node, WHICH_RESULTS=ExperimentSTAGE.ORIGINAL, thresh_technique=thresh_technique)
 
 			# Calculating the initial hierarchy_penalty based on "a" , "b" and "approach"
 			hierarchy_penalty = calculate_raw_weight(pdata)
@@ -1166,7 +1150,7 @@ class CalculateNewFindings:
 
 		def set_H_to_be_ineffective() -> np.ndarray:
 
-			ndata = Hierarchy.get_findings_for_node(G=G , node=node, thresh_technique=thresh_technique , WHICH_RESULTS='ORIGINAL')
+			ndata = Hierarchy.get_findings_for_node(G=G , node=node, thresh_technique=thresh_technique , WHICH_RESULTS=ExperimentSTAGE.ORIGINAL)
 
 			if   approach in ['1', 'logit']: return np.zeros(len(ndata.data.index))
 			elif approach in ['2', 'loss' ]: return np.ones(len(ndata.data.index))
@@ -1250,7 +1234,7 @@ class CalculateNewFindings:
 		data.NEW.hierarchy_penalty[x,node] = CalculateNewFindings.get_hierarchy_penalty_for_node( G=G, a=a, b=b, node=node, thresh_technique=x, parent_condition_mode=config.parent_condition_mode, approach=config.approach )
 
 		# Getting node data
-		ndata: Hierarchy.OUTPUT = Hierarchy.get_findings_for_node( G=G, node=node, thresh_technique=x, WHICH_RESULTS='ORIGINAL' )
+		ndata: Hierarchy.OUTPUT = Hierarchy.get_findings_for_node( G=G, node=node, thresh_technique=x, WHICH_RESULTS=ExperimentSTAGE.ORIGINAL )
 
 		data.NEW.pred[x,node], data.NEW.logit[x,node], data.NEW.loss[x,node] = CalculateNewFindings.do_approach( config=config, w=data.NEW.hierarchy_penalty[x][node], ndata=ndata )
 
@@ -1327,7 +1311,7 @@ class HyperParameterTuning:
 
 		# Initializing the data.NEW
 		if data.NEW is None:
-			data.initialize_findings(pathologies=model.pathologies, experiment_stage='NEW')
+			data.initialize_findings(pathologies=model.pathologies, experiment_stage=ExperimentSTAGE.NEW)
 
 	def initial_hyperparameters(self, a=0.0 , b=1.0): # type: (float, float) -> Dict[str, pd.DataFrame]
 		return {th: pd.DataFrame( {n:dict(a=a,b=b) for n in self.model.pathologies} ) for th in Data.list_thresh_techniques}
@@ -1605,7 +1589,7 @@ class MetricsAllTechniques:
 					truth_notnull = truth_node[mask].to_numpy()
 
 					if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-						fpr, tpr, _ = sk_metrics.roc_curve(truth_notnull, pred_node[mask])
+						fpr, tpr, _ = sklearn.metrics.roc_curve(truth_notnull, pred_node[mask])
 						return fpr, tpr
 					return None, None
 
@@ -1667,7 +1651,7 @@ class MetricsAllTechniquesThresholds:
 	Precision_Recall: MetricsAllTechniques
 
 
-class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
+class AIM1_1_TorchXrayVision():
 
 	def __init__(self, config, seed = 10): # type: (argparse.Namespace, int) -> None
 
@@ -1684,22 +1668,6 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 		# Setting the seed
 		self.setting_random_seeds_for_PyTorch(seed=seed)
 
-		# initializing MLFlow
-		MLFLOW_SETUP.__init__(self, experiment_name=self.config.experiment_name)
-		self.initialize_MLFlow()
-
-	def initialize_MLFlow(self):
-
-		# Adding the MLFlow functions
-		if self.config.RUN_MLFlow:
-			self.start_MLFlow(run_name=self.config.MLFlow_run_name, NEW_RUN=True)
-
-			config_keys = ['parent_condition_mode', 'n_batches_to_process', 'dataset_name', 'model_name']
-			mlflow.log_params( {key: getattr(self.config, key) for key in config_keys} )
-
-		# Downloading the artifacts from MLFlow
-		if 'load_MLFlow' in (self.config.do_findings_original, self.config.do_findings_new):
-			self.download_artifacts(run_name=self.config.MLFlow_run_name, local_path=self.config.local_path.as_posix())
 
 	@staticmethod
 	def measuring_BCE_loss(p, y):
@@ -1724,11 +1692,11 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 		data = self.train if data_mode == 'train' else self.test
 
 		df = pd.DataFrame(  index=data.ORIGINAL.threshold.index ,
-							columns=pd.MultiIndex.from_product( [['Precision_Recall' , 'ROC'],['ORIGINAL','NEW']] ) )
+							columns=pd.MultiIndex.from_product( [['Precision_Recall' , 'ROC'],[ExperimentSTAGE.ORIGINAL,ExperimentSTAGE.NEW]] ) )
 
 		for th_tqn in ['ROC' , 'Precision_Recall']:
-			df[ (th_tqn,'ORIGINAL') ] = data.ORIGINAL.threshold[th_tqn]
-			df[ (th_tqn,'NEW'     ) ] = data.NEW     .threshold[th_tqn]
+			df[ (th_tqn,ExperimentSTAGE.ORIGINAL) ] = data.ORIGINAL.threshold[th_tqn]
+			df[ (th_tqn,ExperimentSTAGE.NEW     ) ] = data.NEW     .threshold[th_tqn]
 
 		return df.replace(np.nan, '')
 
@@ -1787,14 +1755,14 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 		N = data.Hierarchy_cls.G.nodes
 		parent_child = data.Hierarchy_cls.parent_dict[node] + [node]
 
-		df = pd.DataFrame(index=N[node][ 'ORIGINAL' ][ 'data' ].index , columns=pd.MultiIndex.from_product(  [  parent_child,['truth' , 'pred' , 'loss'],['ORIGINAL','NEW']  ] ))
+		df = pd.DataFrame(index=N[node][ ExperimentSTAGE.ORIGINAL ][ 'data' ].index , columns=pd.MultiIndex.from_product(  [  parent_child,['truth' , 'pred' , 'loss'],[ExperimentSTAGE.ORIGINAL,ExperimentSTAGE.NEW]  ] ))
 
 		for n in parent_child:
 			for dtype in ['truth' , 'pred' , 'loss']:
-				df[ (n, dtype, 'ORIGINAL')] = N[n][ 'ORIGINAL' ][ 'data' ][dtype].values
-				df[ (n , dtype, 'NEW')]     = N[n][ 'NEW' ][ 'data' ][thresh_technq][dtype].values
+				df[ (n, dtype, ExperimentSTAGE.ORIGINAL)] = N[n][ ExperimentSTAGE.ORIGINAL ][ 'data' ][dtype].values
+				df[ (n , dtype, ExperimentSTAGE.NEW)]     = N[n][ ExperimentSTAGE.NEW ][ 'data' ][thresh_technq][dtype].values
 
-			df[(n, 'hierarchy_penalty', 'NEW')] = N[n][ 'hierarchy_penalty' ][thresh_technq].values
+			df[(n, 'hierarchy_penalty', ExperimentSTAGE.NEW)] = N[n][ 'hierarchy_penalty' ][thresh_technq].values
 
 		return df.round(decimals=3).replace(np.nan, '', regex=True)
 
@@ -1824,9 +1792,9 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 				findings.metrics[x,node]['Threshold'] = th[np.argmax( f_score )]
 
 		def calculating_Metrics(y, yhat, x):
-			findings.metrics[x, node]['AUC'] = sk_metrics.roc_auc_score( y, yhat )
-			findings.metrics[x, node]['ACC'] = sk_metrics.accuracy_score( y, yhat >= findings.metrics[x, node]['Threshold'] )
-			findings.metrics[x, node]['F1']  = sk_metrics.f1_score      ( y, yhat >= findings.metrics[x, node]['Threshold'] )
+			findings.metrics[x, node]['AUC'] = sklearn.metrics.roc_auc_score( y, yhat )
+			findings.metrics[x, node]['ACC'] = sklearn.metrics.accuracy_score( y, yhat >= findings.metrics[x, node]['Threshold'] )
+			findings.metrics[x, node]['F1']  = sklearn.metrics.f1_score      ( y, yhat >= findings.metrics[x, node]['Threshold'] )
 
 		# Finding the indices where the truth is not nan
 		non_null = ~np.isnan( findings.truth[node] )
@@ -1834,7 +1802,7 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 
 		if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
 			# for thresh_technique in Data.list_thresh_techniques:
-			pred = findings.pred[node] if findings.experiment_stage == 'ORIGINAL' else findings.pred[thresh_technique,node]
+			pred = findings.pred[node] if findings.experiment_stage == ExperimentSTAGE.ORIGINAL else findings.pred[thresh_technique,node]
 			pred_notnull = pred[non_null].to_numpy()
 
 			calculating_optimal_Thresholds( y = truth_notnull, yhat = pred_notnull, x = thresh_technique )
@@ -1859,8 +1827,7 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 				# Save the Excel file
 				# writer.save()
 
-			if self.config.RUN_MLFlow:
-				mlflow.log_artifact(local_path=path, artifact_path=self.config.artifact_path)
+
 
 	def get_metric(self, metric='AUC', data_mode='train') -> pd.DataFrame:
 
@@ -1868,14 +1835,14 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 
 		column_names = data.labels.list_nodes_impacted
 
-		columns = pd.MultiIndex.from_product([Data.list_thresh_techniques, [ 'ORIGINAL', 'NEW']], names=['thresh_technique', 'WR'])
+		columns = pd.MultiIndex.from_product([Data.list_thresh_techniques, [ ExperimentSTAGE.ORIGINAL, ExperimentSTAGE.NEW]], names=['thresh_technique', 'WR'])
 		df = pd.DataFrame(index=data.ORIGINAL.pathologies, columns=columns)
 
 		for x in Data.list_thresh_techniques:
 			if hasattr(data.ORIGINAL, 'metrics'):
-				df[x, 'ORIGINAL'] = data.ORIGINAL.metrics[x].T[metric]
+				df[x, ExperimentSTAGE.ORIGINAL] = data.ORIGINAL.metrics[x].T[metric]
 			if hasattr(data.NEW, 'metrics'):
-				df[x, 'NEW'] = data.NEW     .metrics[x].T[metric]
+				df[x, ExperimentSTAGE.NEW] = data.NEW     .metrics[x].T[metric]
 
 		df = df.apply(pd.to_numeric, errors='ignore').round(3).replace(np.nan, '')
 
@@ -1947,25 +1914,20 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 				a1 = cls.run_full_experiment(approach=approach, dataset_name=dataset_name)
 
 				metric = getattr( getattr(a1,data_mode),method)
-				data['pred'].append(metric.pred[thresh_technique] if method=='NEW' else metric.pred)
+				data['pred'].append(metric.pred[thresh_technique] if method==ExperimentSTAGE.NEW else metric.pred)
 				data['truth'].append(metric.truth)
 				data['yhat'].append(data['pred'][-1] >= metric.metrics[thresh_technique].T['Threshold'].T )
 				data['list_nodes_impacted'].append(getattr(a1, data_mode).labels.list_nodes_impacted)
 
 			return DataMerged(data)
 
-		baseline = get('ORIGINAL')
-		proposed = get('NEW')
+		baseline = get(ExperimentSTAGE.ORIGINAL)
+		proposed = get(ExperimentSTAGE.NEW)
 
 		return baseline, proposed
 
 	@classmethod
-	# type: (list, str, str, bool, dict) -> MetricsAllTechniques
-	def get_all_metrics(cls, datasets_list=['CheX', 'NIH', 'PC'], data_mode='test', thresh_technique='default', jupyter=True, **kwargs):
-
-		from sklearn.metrics import cohen_kappa_score
-		from scipy import stats
-		import pingouin as pg
+	def get_all_metrics(cls, datasets_list=['CheX', 'NIH', 'PC'], data_mode='test', thresh_technique='default', jupyter=True, **kwargs): # type: (list, str, str, bool, dict) -> MetricsAllTechniques
 
 		config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
 		save_path = pathlib.Path(f'tables/metrics_all_datasets/{thresh_technique}')
@@ -1981,9 +1943,9 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 				truth_notnull = data.truth[node][non_null].to_numpy()
 
 				if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-					data.auc_acc_f1[node]['AUC'] = sk_metrics.roc_auc_score( data.truth[node][non_null], data.yhat[node][non_null])
-					data.auc_acc_f1[node]['ACC'] = sk_metrics.accuracy_score(data.truth[node][non_null], data.yhat[node][non_null])
-					data.auc_acc_f1[node]['F1']  = sk_metrics.f1_score( 	 data.truth[node][non_null], data.yhat[node][non_null])
+					data.auc_acc_f1[node]['AUC'] = sklearn.metrics.roc_auc_score( data.truth[node][non_null], data.yhat[node][non_null])
+					data.auc_acc_f1[node]['ACC'] = sklearn.metrics.accuracy_score(data.truth[node][non_null], data.yhat[node][non_null])
+					data.auc_acc_f1[node]['F1']  = sklearn.metrics.f1_score( 	 data.truth[node][non_null], data.yhat[node][non_null])
 
 			def get_p_value_kappa_cohen_d_BF10(df, node): # type: (pd.DataFrame, str) -> None
 
@@ -1991,7 +1953,7 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 				df.loc['t_stat',node], df.loc['p_value',node] = stats.ttest_ind( baseline.yhat[node], proposed.yhat[node])
 
 				# kappa inter rater metric
-				df.loc['kappa',node] = cohen_kappa_score(baseline.yhat[node], proposed.yhat[node])
+				df.loc['kappa',node] = sklearn.metrics.cohen_kappa_score(baseline.yhat[node], proposed.yhat[node])
 
 				df_ttest = pg.ttest(baseline.yhat[node], proposed.yhat[node])
 				df.loc['power',node]   = df_ttest['power'].values[0]
@@ -2043,8 +2005,7 @@ class AIM1_1_TorchXrayVision(MLFLOW_SETUP):
 		return MetricsAllTechniques(loss=loss, logit=logit, auc_acc_f1=auc_acc_f1, thresh_technique=thresh_technique, datasets_list=datasets_list, data_mode=data_mode)
 
 	@classmethod
-	# type: (list, str) -> MetricsAllTechniquesThresholds
-	def get_all_metrics_all_thresh_techniques(cls, datasets_list=['CheX', 'NIH', 'PC'], data_mode='test'):
+	def get_all_metrics_all_thresh_techniques(cls, datasets_list: list[str]=['CheX', 'NIH', 'PC'], data_mode: str='test') -> MetricsAllTechniquesThresholds:
 
 		output = {}
 		for x in tqdm(['default', 'ROC', 'Precision_Recall']):
@@ -2199,10 +2160,6 @@ class Tables:
 				for m in ['auc', 'f1', 'acc']:
 					getattr(metrics, m).to_excel(writer, sheet_name=m.upper())
 
-				# Save the excel file to MLFlow
-				if self.config.RUN_MLFlow:
-					mlflow.log_artifact(local_path=save_path, artifact_path=self.config.artifact_path)
-
 		def get():
 			columns = pd.MultiIndex.from_product([Data.list_datasets,['baseline', 'on_logit', 'on_loss']], names=['dataset', 'approach'])
 			auc = pd.DataFrame(columns=columns)
@@ -2271,10 +2228,10 @@ class Tables:
 				return df2.apply(combine_PA_AP, axis=1)
 
 
-			columns = pd.MultiIndex.from_product( [['original', 'updated'], Data.list_datasets])
+			columns = pd.MultiIndex.from_product( [[ExperimentSTAGE.ORIGINAL, 'updated'], Data.list_datasets])
 			df = pd.DataFrame(columns=columns)
 
-			for mode, dname in itertools.product(['original', 'updated'], Data.list_datasets):
+			for mode, dname in itertools.product([ExperimentSTAGE.ORIGINAL, 'updated'], Data.list_datasets):
 				df[(mode, dname)] = get_PA_AP(mode=mode, dname=dname)
 
 			return df
@@ -2301,7 +2258,6 @@ class Visualize:
 
 		def get_reduced_features(feature_maps, method): # type: (np.ndarray, str) -> np.ndarray
 			if method.upper() == 'UMAP':
-				import umap
 				reducer = umap.UMAP()
 				return reducer.fit_transform(feature_maps)
 

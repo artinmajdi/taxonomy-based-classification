@@ -1,3 +1,0 @@
--r requirements.txt
-pytest
-pydicom>=2.3.1
