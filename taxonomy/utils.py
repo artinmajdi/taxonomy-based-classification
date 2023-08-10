@@ -1,7 +1,6 @@
 import argparse
 import concurrent.futures
 import contextlib
-import enum
 import itertools
 import json
 import multiprocessing
@@ -31,142 +30,11 @@ from scipy import stats
 from tqdm import tqdm
 
 import torchxrayvision as xrv
+from taxonomy.data_classes import Data, Findings, Labels
+from taxonomy.fixed_params import ExperimentSTAGE, DatasetList, ThreshTechList, DataModes, MethodNames
 
 # region
 USE_CUDA = torch.cuda.is_available()
-
-class System:
-	def __init__(self):
-		pass
-
-	@property
-	def list_physical_devices(self):
-		print('torch:' , torch.cuda.device_count())
-		return [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
-
-@enum.unique
-class ExperimentSTAGE(enum.Enum):
-	ORIGINAL = 'ORIGINAL'
-	NEW      = 'NEW'
-
-@enum.unique
-class DatasetList(enum.Enum):
-	PC   = 'PC'
-	NIH  = 'NIH'
-	CheX = 'CheX'
-
-@enum.unique
-class ThreshTechList(enum.Enum):
-	DEFAULT          = 'DEFAULT'
-	ROC              = 'ROC'
-	PRECISION_RECALL = 'PRECISION_RECALL'
-
-
-
-class Findings:
-
-	list_metrics   = ['AUC'    , 'ACC' , 'F1'   , 'Threshold']
-	list_arguments = ['metrics', 'pred', 'logit', 'truth'     , 'loss']
-
-	def __init__(self, pathologies, experiment_stage: str):
-
-		self.experiment_stage = ExperimentSTAGE[experiment_stage.upper()]
-		self.pathologies        : List[str] = pathologies
-
-		# Initializing Metrics & Thresholds
-		columns = pd.MultiIndex.from_product([Data.list_thresh_techniques, self.pathologies], names=['thresh_technique', 'pathologies'])
-		self.metrics = pd.DataFrame(columns=columns, index=Findings.list_metrics)
-
-		# Initializing Arguments & Findings
-		self.truth = pd.DataFrame(columns=pathologies)
-
-		if self.experiment_stage == ExperimentSTAGE.ORIGINAL:
-			self.pred     = pd.DataFrame(columns=pathologies)
-			self.logit    = pd.DataFrame(columns=pathologies)
-			self.loss     = pd.DataFrame(columns=pathologies)
-			self._results = { key : getattr( self, key ) for key in Findings.list_arguments }
-
-		elif self.experiment_stage == ExperimentSTAGE.NEW:
-			self.pred              = pd.DataFrame( columns=columns )
-			self.logit             = pd.DataFrame( columns=columns )
-			self.loss              = pd.DataFrame( columns=columns )
-			self.hierarchy_penalty = pd.DataFrame( columns=columns )
-			self._results = { key : getattr( self, key ) for key in Findings.list_arguments + ['hierarchy_penalty'] }
-
-	@property
-	def results(self):
-		return self._results
-
-	@results.setter
-	def results(self, value):
-		self._results = value
-
-		if value is not None:
-			for key in Findings.list_arguments:
-				setattr(self, key, value[key])
-
-			if self.experiment_stage == ExperimentSTAGE.NEW:
-				setattr(self, 'hierarchy_penalty', value['hierarchy_penalty'])
-
-class Labels:
-	def __init__(self, d_data, Hierarchy_cls):
-
-		self.__labels = pd.DataFrame( d_data.labels, columns=d_data.pathologies ) if d_data else pd.DataFrame()
-		self.totals   = pd.DataFrame(d_data.totals()) if d_data else pd.DataFrame()
-		self.unique   = self.totals.index.to_list()
-		self.list_not_null_nodes 		  = self.__labels.columns[self.__labels.count() > 0].to_list() if self.__labels.size > 0 else []
-		self.list_nodes_exist_in_taxonomy = Hierarchy_cls.list_nodes_exist_in_taxonomy if Hierarchy_cls else []
-		self.list_nodes_impacted          = [x for x in self.list_not_null_nodes if x in self.list_nodes_exist_in_taxonomy]
-		self.list_parent_nodes = set(Hierarchy.taxonomy_structure.keys())
-
-	def __repr__(self):
-		return self.__labels.__repr__()
-
-	def __getattr__(self, attr):
-		return getattr( self.__labels, attr )
-
-	def __getitem__(self, item):
-		return self.__labels[item]
-
-class Data:
-
-	data_loader: torch.utils.data.DataLoader = None
-	list_thresh_techniques = ThreshTechList
-	list_datasets = DatasetList
-
-	def __init__(self, data_mode: str='train'):
-
-		assert data_mode in {'train', 'test'}
-
-		self.data_mode    : str                                 = data_mode
-		self._d_data      : Optional[xrv.datasets.CheX_Dataset] = None
-		self.data_loader  : torch.utils.data.DataLoader         = None
-		self.Hierarchy_cls: Optional[Hierarchy]                 = None
-		self.ORIGINAL     : Optional[Findings]                  = None
-		self.NEW          : Optional[Findings]                  = None
-		self.labels 	  : Optional[Labels]      				= None
-		self.list_findings_names: list 					         = []
-
-	@property
-	def d_data(self):
-		return self._d_data
-
-	@d_data.setter
-	def d_data(self, value):
-		# Adding the initial Graph
-		if value is not None:
-			self._d_data 	   = value
-			self.Hierarchy_cls = Hierarchy(value.pathologies)
-			self.labels 	   = Labels(d_data=value, Hierarchy_cls=self.Hierarchy_cls)
-
-	@property
-	def list_nodes_thresh_techniques(self) -> List[List[str]]:
-		return [[node, thresh] for thresh in Data.list_thresh_techniques for node in self.labels.list_nodes_impacted]  if len(self.labels.list_nodes_impacted) else []
-
-	def initialize_findings(self, pathologies: list[str], experiment_stage: str):
-		setattr(self, experiment_stage, Findings(experiment_stage=experiment_stage, pathologies=pathologies))
-
-		self.list_findings_names.append(experiment_stage)
 
 class Hierarchy:
 
@@ -207,7 +75,7 @@ class Hierarchy:
 
 		def add_hyperparameters_to_graph():
 			for parent_node, child_node in self.G.edges:
-				self.G.edges[parent_node, child_node]['hyperparameters'] = { x: hyperparameters[x][child_node].copy() for x in Data.list_thresh_techniques }
+				self.G.edges[parent_node, child_node]['hyperparameters'] = { x: hyperparameters[x][child_node].copy() for x in ThreshTechList }
 
 		def graph_add_findings_original_to_nodes(findings: dict):
 
@@ -219,7 +87,7 @@ class Hierarchy:
 						  loss=findings['loss'][n] ) )
 
 				metrics = { }
-				for x in Data.list_thresh_techniques:
+				for x in ThreshTechList:
 					metrics[x] = findings['metrics'][x, n]
 
 				# Adding the findings to the graph node
@@ -232,7 +100,7 @@ class Hierarchy:
 
 				# Merging the pred, truth, and loss into a dataframe
 				data, metrics, hierarchy_penalty = { }, { }, pd.DataFrame()
-				for x in Data.list_thresh_techniques:
+				for x in ThreshTechList:
 					data[x] = pd.DataFrame(
 						dict( truth=findings['truth'][n], pred=findings['pred'][x, n], loss=findings['loss'][x, n] ) )
 					metrics[x] = findings['metrics'][x, n]
@@ -465,70 +333,32 @@ class LoadSaveFindings:
 	def load(self, source='load_MLFlow', run_name=None, run_id=None, **kwargs):
 		return SaveFile(self.path).load(**kwargs)
 
-	# def save_figure(self):
-	# 	for format in ['png', 'eps', 'svg', 'pdf']:
-	# 		path = self.path.joinpath(f'{self.filename}.{format}')
-	# 		plt.savefig(path, format=format, dpi=300)
-
-	# 		if self.config.RUN_MLFlow:
-	# 			mlflow.log_artifact(local_path=path, artifact_path=self.config.artifact_path)
-
 class LoadChestXrayDatasets:
 
-	def __init__(self, config, pathologies_in_model=None): # type: (argparse.Namespace, List[str]) -> None
+	def __init__(self, config: argparse.Namespace, pathologies_in_model: List[str]=None) -> None:
 
 		self.d_data: Optional[xrv.datasets.CheX_Dataset]  = None
 		self.pathologies_in_model = pathologies_in_model or []
 
-		self.train = Data('train')
-		self.test  = Data('test')
+		self.train = Data(DataModes.TRAIN)
+		self.test  = Data(DataModes.TEST)
 
 		self.config = config
 		self.config.dataset_name = self.fix_dataset_name(config.dataset_name)
 
 	def load_raw_database(self):
-		"""_summary_: This function will load the dataset from the torchxrayvision library
-
-			# RSNA Pneumonia Detection Challenge. https://pubs.rsna.org/doi/full/10.1148/ryai.2019180041
-			d_kaggle = xrv.datasets.RSNA_Pneumonia_Dataset(imgpath="path to stage_2_train_images_jpg",  transform=transform)
-
-			# CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison. https://arxiv.org/abs/1901.07031
-			d_chex = xrv.datasets.CheX_Dataset(imgpath="path to CheXpert-v1.0-small",  csvpath="path to CheXpert-v1.0-small/train.csv",  transform=transform)
-
-			# National Institutes of Health ChestX-ray8 dataset. https://arxiv.org/abs/1705.02315
-			d_nih = xrv.datasets.NIH_Dataset(imgpath="path to NIH images")
-
-			# A relabelling of a subset of NIH images from: https://pubs.rsna.org/doi/10.1148/radiol.2019191293
-			d_nih2 = xrv.datasets.NIH_Google_Dataset(imgpath="path to NIH images")
-
-			# PadChest: A large chest thresh_technique-ray image dataset with multi-label annotated reports. https://arxiv.org/abs/1901.07441
-			d_pc = xrv.datasets.PC_Dataset(imgpath="path to image folder")
-
-			# COVID-19 Image Data Collection. https://arxiv.org/abs/2006.11988
-			d_covid19 = xrv.datasets.COVID19_Dataset() # specify imgpath and csvpath for the dataset
-
-			# SIIM Pneumothorax Dataset. https://www.kaggle.com/c/siim-acr-pneumothorax-segmentation
-			d_siim = xrv.datasets.SIIM_Pneumothorax_Dataset(imgpath="dicom-images-train/",  csvpath="train-rle.csv")
-
-			# VinDr-CXR: An open dataset of chest X-rays with radiologist's annotations. https://arxiv.org/abs/2012.15029
-			d_vin = xrv.datasets.VinBrain_Dataset(imgpath=".../train",   csvpath=".../train.csv")
-
-			# National Library of Medicine Tuberculosis Datasets. https://www.ncbi.nlm.nih.gov/pmc/articles/PMC4256233/
-			d_nlmtb = xrv.datasets.NLMTB_Dataset(imgpath="path to MontgomerySet or ChinaSet_AllFiles")
 		"""
+			# RSNA Pneumonia Detection Challenge. https://pubs.rsna.org/doi/full/10.1148/ryai.2019180041
+				Augmenting the National Institutes of Health Chest Radiograph Dataset with Expert
+				Annotations of Possible Pneumonia.	Shih, George, Radiology: Artificial Intelligence, 1 2019. doi: 10.1148/ryai.2019180041.
+				More info: https://www.rsna.org/en/education/ai-resources-and-training/ai-image-challenge/RSNA-Pneumonia-Detection-Challenge-2018
+				Challenge site:	https://www.kaggle.com/c/rsna-pneumonia-detection-challenge
+				JPG files stored here: 	https://academictorrents.com/details/95588a735c9ae4d123f3ca408e56570409bcf2a9
+				
+			# CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison. https://arxiv.org/abs/1901.07031
+				Dataset website here: https://stanfordmlgroup.github.io/competitions/chexpert/
 
-		assert self.dataset_path.exists(), "Dataset directory does not exist!"
-
-		params = dict(imgpath=str(self.dataset_path), views=self.config.views)
-		csvpath = str(self.csv_path)
-
-		# Image transofrmation function
-		transform = torchvision.transforms.Compose(
-			[xrv.datasets.XRayCenterCrop(), xrv.datasets.XRayResizer(size=224, engine="cv2")])
-
-		if self.config.dataset_name == 'NIH':
-			"""
-				NIH ChestX-ray8 dataset
+			# NIH ChestX-ray8 dataset. https://arxiv.org/abs/1705.02315
 				Dataset release website:
 				https://www.nih.gov/news-events/news-releases/nih-clinical-center-provides-one-largest-publicly-available-chest-x-ray-datasets-scientific-community
 
@@ -537,14 +367,8 @@ class LoadChestXrayDatasets:
 
 				Download resized (224x224) images here:
 				https://academictorrents.com/details/e615d3aebce373f1dc8bd9d11064da55bdadede0
-			"""
-			self.d_data = xrv.datasets.NIH_Dataset(**params)  # , transform=transform
-
-		elif self.config.dataset_name == 'PC':
-			"""
-				PadChest dataset
-				Hospital San Juan de Alicante - University of Alicante
-
+				
+			# PadChest: A large chest thresh_technique-ray image dataset with multi-label annotated reports. https://arxiv.org/abs/1901.07441
 				Note that images with null labels (as opposed to normal), and images that cannot
 				be properly loaded (listed as 'missing' in the code) are excluded, which makes
 				the total number of available images slightly less than the total number of image
@@ -553,106 +377,30 @@ class LoadChestXrayDatasets:
 				PadChest: A large chest thresh_technique-ray image dataset with multi-label annotated reports.
 				Aurelia Bustos, Antonio Pertusa, Jose-Maria Salinas, and Maria de la Iglesia-Vayá.
 				arXiv preprint, 2019. https://arxiv.org/abs/1901.07441
+				Dataset website: https://bimcv.cipf.es/bimcv-projects/padchest/
+				Download full size images here: https://academictorrents.com/details/dec12db21d57e158f78621f06dcbe78248d14850
+				Download resized (224x224) images here (recropped):	https://academictorrents.com/details/96ebb4f92b85929eadfb16761f310a6d04105797
 
-				Dataset website:
-				https://bimcv.cipf.es/bimcv-projects/padchest/
-
-				Download full size images here:
-				https://academictorrents.com/details/dec12db21d57e158f78621f06dcbe78248d14850
-
-				Download resized (224x224) images here (recropped):
-				https://academictorrents.com/details/96ebb4f92b85929eadfb16761f310a6d04105797
-			"""
-			self.d_data = xrv.datasets.PC_Dataset(**params)  # , transform=transform
-
-		elif self.config.dataset_name == 'CheX':
-			"""
-				CheXpert Dataset
-
-				CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison.
-				Jeremy Irvin *, Pranav Rajpurkar *, Michael Ko, Yifan Yu, Silviana Ciurea-Ilcus, Chris Chute,
-				Henrik Marklund, Behzad Haghgoo, Robyn Ball, Katie Shpanskaya, Jayne Seekins, David A. Mong,
-				Safwan S. Halabi, Jesse K. Sandberg, Ricky Jones, David B. Larson, Curtis P. Langlotz,
-				Bhavik N. Patel, Matthew P. Lungren, Andrew Y. Ng. https://arxiv.org/abs/1901.07031
-
-				Dataset website here:
-				https://stanfordmlgroup.github.io/competitions/chexpert/
-
-				A small validation set is provided with the data as well, but is so tiny, it not included
-				here.
-			"""
-			self.d_data = xrv.datasets.CheX_Dataset(**params, csvpath=csvpath, transform=transform)
-
-		elif self.config.dataset_name == 'MIMIC':
-			"""
-				MIMIC-CXR Dataset
-
-				Johnson AE, Pollard TJ, Berkowitz S, Greenbaum NR, Lungren MP, Deng CY, Mark RG, Horng S.
-				MIMIC-CXR: A large publicly available database of labeled chest radiographs.
-				arXiv preprint arXiv:1901.07042. 2019 Jan 21.
-
-				https://arxiv.org/abs/1901.07042
-
-				Dataset website here:
-				https://physionet.org/content/mimic-cxr-jpg/2.0.0/
-			"""
-			self.d_data = xrv.datasets.MIMIC_Dataset(**params, transform=transform, csvpath=csvpath, metacsvpath=str(self.meta_csv_path))
-
-		elif self.config.dataset_name == 'Openi':
-			"""
-				OpenI Dataset
-
-				Dina Demner-Fushman, Marc D. Kohli, Marc B. Rosenman, Sonya E. Shooshan, Laritza
-				Rodriguez, Sameer Antani, George R. Thoma, and Clement J. McDonald. Preparing a
-				collection of radiology examinations for distribution and retrieval. Journal of the American
+			# VinDr-CXR: An open dataset of chest X-rays with radiologist's annotations. https://arxiv.org/abs/2012.15029
+				VinBrain Dataset. Nguyen et al., VinDr-CXR: An open dataset of chest X-rays with radiologist's annotations
+				https://arxiv.org/abs/2012.15029
+				https://www.kaggle.com/c/vinbigdata-chest-xray-abnormalities-detection
+			
+			# MIMIC-CXR Dataset
+				Johnson AE,	MIMIC-CXR: A large publicly available database of labeled chest radiographs.
+				arXiv preprint arXiv:1901.07042. 2019 Jan 21.	https://arxiv.org/abs/1901.07042
+				Dataset website here:	https://physionet.org/content/mimic-cxr-jpg/2.0.0/
+			
+			# OpenI Dataset
+				Dina Demner-Fushman, Preparing a collection of radiology examinations for distribution and retrieval. Journal of the American
 				Medical Informatics Association, 2016. doi: 10.1093/jamia/ocv080.
 
 				Views have been determined by projection using T-SNE.  To use the T-SNE view rather than the
 				view defined by the record, set use_tsne_derived_view to true.
-
-				Dataset website:
-				https://openi.nlm.nih.gov/faq
-
-				Download images:
-				https://academictorrents.com/details/5a3a439df24931f410fac269b87b050203d9467d
-			"""
-			self.d_data = xrv.datasets.Openi_Dataset(**params, transform=transform)
-
-		elif self.config.dataset_name == 'VinBrain':
-			"""
-				VinBrain Dataset
-
-				Nguyen et al., VinDr-CXR: An open dataset of chest X-rays with radiologist's annotations
-				https://arxiv.org/abs/2012.15029
-
-				https://www.kaggle.com/c/vinbigdata-chest-xray-abnormalities-detection
-			"""
-			self.d_data = xrv.datasets.VinBrain_Dataset(**params, csvpath=csvpath)  # transform=transform
-
-		elif self.config.dataset_name == 'RSNA':
-			"""
-				RSNA Pneumonia Detection Challenge
-
-				Augmenting the National Institutes of Health Chest Radiograph Dataset with Expert
-				Annotations of Possible Pneumonia.
-				Shih, George, Wu, Carol C., Halabi, Safwan S., Kohli, Marc D., Prevedello, Luciano M.,
-				Cook, Tessa S., Sharma, Arjun, Amorosa, Judith K., Arteaga, Veronica, Galperin-Aizenberg,
-				Maya, Gill, Ritu R., Godoy, Myrna C.B., Hobbs, Stephen, Jeudy, Jean, Laroia, Archana,
-				Shah, Palmi N., Vummidi, Dharshan, Yaddanapudi, Kavitha, and Stein, Anouk.
-				Radiology: Artificial Intelligence, 1 2019. doi: 10.1148/ryai.2019180041.
-
-				More info: https://www.rsna.org/en/education/ai-resources-and-training/ai-image-challenge/RSNA-Pneumonia-Detection-Challenge-2018
-
-				Challenge site:
-				https://www.kaggle.com/c/rsna-pneumonia-detection-challenge
-
-				JPG files stored here:
-				https://academictorrents.com/details/95588a735c9ae4d123f3ca408e56570409bcf2a9
-			"""
-			self.d_data = xrv.datasets.RSNA_Pneumonia_Dataset(**params, transform=transform)
-
-		elif self.config.dataset_name == 'NIH_Google':
-			"""
+				Dataset website: https://openi.nlm.nih.gov/faq
+				Download images: https://academictorrents.com/details/5a3a439df24931f410fac269b87b050203d9467d
+				
+			# NIH_Google Dataset
 				A relabelling of a subset of images from the NIH dataset.  The data tables should
 				be applied against an NIH download.  A test and validation split are provided in the
 				original.  They are combined here, but one or the other can be used by providing
@@ -660,17 +408,42 @@ class LoadChestXrayDatasets:
 
 				Chest Radiograph Interpretation with Deep Learning Models: Assessment with
 				Radiologist-adjudicated Reference Standards and Population-adjusted Evaluation
-				Anna Majkowska, Sid Mittal, David F. Steiner, Joshua J. Reicher, Scott Mayer
-				McKinney, Gavin E. Duggan, Krish Eswaran, Po-Hsuan Cameron Chen, Yun Liu,
-				Sreenivasa Raju Kalidindi, Alexander Ding, Greg S. Corrado, Daniel Tse, and
-				Shravya Shetty. Radiology 2020
+				Anna Majkowska,. Radiology 2020		https://pubs.rsna.org/doi/10.1148/radiol.2019191293
+				NIH data can be downloaded here:	https://academictorrents.com/details/e615d3aebce373f1dc8bd9d11064da55bdadede0
+		"""
 
-				https://pubs.rsna.org/doi/10.1148/radiol.2019191293
+		assert self.dataset_path.exists(), "Dataset directory does not exist!"
+		imgpath   = str(self.dataset_path)
+		views     = self.config.views
+		csvpath   = str(self.csv_path)
+		transform = torchvision.transforms.Compose([xrv.datasets.XRayCenterCrop(), xrv.datasets.XRayResizer(size = 224, engine = "cv2")])
 
-				NIH data can be downloaded here:
-				https://academictorrents.com/details/e615d3aebce373f1dc8bd9d11064da55bdadede0
-			"""
-			self.d_data = xrv.datasets.NIH_Google_Dataset(**params)
+		params_config = {
+			'NIH'       : dict(imgpath = imgpath, views = views),
+			'PC'        : dict(imgpath = imgpath, views = views),
+			'CheX'      : dict(imgpath = imgpath, views = views , transform = transform , csvpath = csvpath),
+			'MIMIC'     : dict(imgpath = imgpath, views = views , transform = transform , csvpath = csvpath , metacsvpath = str(self.meta_csv_path)),
+			'Openi'     : dict(imgpath = imgpath, views = views , transform = transform),
+			'VinBrain'  : dict(imgpath = imgpath, views = views , csvpath   = csvpath),
+			'RSNA'      : dict(imgpath = imgpath, views = views , transform = transform),
+			'NIH_Google': dict(imgpath = imgpath, views = views)
+		}
+		
+		dataset_config = {
+			'NIH'       : xrv.datasets.NIH_Dataset,
+			'PC'        : xrv.datasets.PC_Dataset,
+			'CheX'      : xrv.datasets.CheX_Dataset,
+			'MIMIC'     : xrv.datasets.MIMIC_Dataset,
+			'Openi'     : xrv.datasets.Openi_Dataset,
+			'VinBrain'  : xrv.datasets.VinBrain_Dataset,
+			'RSNA'      : xrv.datasets.RSNA_Pneumonia_Dataset,
+			'NIH_Google': xrv.datasets.NIH_Google_Dataset
+		}
+
+		d_name = self.config.dataset_name
+		if d_name in dataset_config:
+			self.d_data = dataset_config.get(d_name)(**params_config.get(d_name))
+
 
 	def relabel_raw_database(self):
 		# Adding the PatientID if it doesn't exist
@@ -693,19 +466,15 @@ class LoadChestXrayDatasets:
 		child_dict = Hierarchy(classes=self.d_data.pathologies).child_dict
 
 		for parent, children in child_dict.items():
-
-			# This make sure to not do this for parents with only one child since it wouldn't change the results.
-			# if len(children) <= 1:
-			# 	continue
-
+			
 			# Checking if the parent class existed in the original pathologies in the dataset. will only replace its values if all its labels are NaN
 			if labels[parent].value_counts().values.shape[0] == 0:
 				if not self.config.silent: print(f"Parent class: {parent} is not in the dataset. replacing its true values according to its children presence.")
 
-				# initializating the parent label to 0
+				# Initializing the parent label to 0
 				labels[parent] = 0
 
-				# if at-least one of the children has a label of 1, then the parent label is 1
+				# If at-least one of the children has a label of 1, then the parent label is 1
 				labels[parent][ labels[children].sum(axis=1) > 0 ] = 1
 
 		self.d_data.labels = labels.values
@@ -747,7 +516,6 @@ class LoadChestXrayDatasets:
 				labels  = pd.DataFrame( dataset.labels , columns=columns)
 
 			self.d_data = dataset
-
 
 		# Loading the data using torchxrayvision package
 		self.load_raw_database()
@@ -957,7 +725,7 @@ class LoadModelXRV:
 		return ['NIH', 'RSNA', 'PC', 'CheX', 'MIMIC_NB', 'MIMIC_CH', 'ALL_224', 'ALL_512', 'baseline_jfhealthcare', 'baseline_CheX']
 
 	@classmethod
-	def extract_feature_maps(cls, config, data_mode='test'): # type: (argparse.Namespace, str) -> Tuple[np.ndarray, pd.DataFrame]
+	def extract_feature_maps(cls, config, data_mode=DataModes.TEST): # type: (argparse.Namespace, str) -> Tuple[np.ndarray, pd.DataFrame]
 
 		LM = cls(config)
 		model = LM.load()
@@ -991,7 +759,7 @@ class LoadModelXRV:
 		with torch.no_grad(): # inference_mode no_grad
 			feature_maps, truth = looping_over_all_batches(data_loader=data.data_loader, n_batches_to_process=config.n_batches_to_process)
 
-		return feature_maps , pd.DataFrame(truth, columns=model.pathologies), data.labels.list_not_null_nodes
+		return feature_maps , pd.DataFrame(truth, columns=model.pathologies), data.labels.nodes.not_null
 
 # endregion
 
@@ -1267,7 +1035,7 @@ class CalculateNewFindings:
 
 			# fixing_dataframes_indices_columns
 			pathologies = data.ORIGINAL.truth.columns
-			columns = pd.MultiIndex.from_product([Data.list_thresh_techniques, pathologies], names=['thresh_technique', 'pathologies'])
+			columns = pd.MultiIndex.from_product([ThreshTechList, pathologies], names=['thresh_technique', 'pathologies'])
 			index   = data.ORIGINAL.truth.index
 
 			# I'm trying to see if I can remove this function, and make the change directly when intializing the Data
@@ -1277,8 +1045,8 @@ class CalculateNewFindings:
 			data.NEW.hierarchy_penalty = pd.DataFrame( index=index, columns=columns )
 
 		initialization()
-		for x in Data.list_thresh_techniques:
-			for node in data.labels.list_not_null_nodes:
+		for x in ThreshTechList:
+			for node in data.labels.nodes.not_null:
 				data = CalculateNewFindings.calculate_per_node( node=node, data=data, config=config, hyperparameters=hyperparameters, thresh_technique=x )
 
 		data.NEW.results = { key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', 'loss', 'hierarchy_penalty'] }
@@ -1329,7 +1097,7 @@ class HyperParameterTuning:
 			data.initialize_findings(pathologies=model.pathologies, experiment_stage=ExperimentSTAGE.NEW)
 
 	def initial_hyperparameters(self, a=0.0 , b=1.0): # type: (float, float) -> Dict[str, pd.DataFrame]
-		return {th: pd.DataFrame( {n:dict(a=a,b=b) for n in self.model.pathologies} ) for th in Data.list_thresh_techniques}
+		return {th: pd.DataFrame( {n:dict(a=a,b=b) for n in self.model.pathologies} ) for th in ThreshTechList}
 
 	@staticmethod
 	def calculate_per_node(data: Data, config: argparse.Namespace, hyperparameters: Dict[str, pd.DataFrame], node: str, thresh_technique: ThreshTechList=ThreshTechList.DEFAULT) -> List[float]:
@@ -1384,18 +1152,18 @@ class HyperParameterTuning:
 		with contextlib.suppress(KeyboardInterrupt):
 
 			if PARALLELIZE == 0:
-				results = [extended_calculate_per_node(node_thresh) for node_thresh in data.list_nodes_thresh_techniques]
+				results = [extended_calculate_per_node(node_thresh) for node_thresh in data.labels.nodes.node_thresh_tuple]
 
 			elif PARALLELIZE == 1:
 				multiprocessing.set_start_method('spawn', force=True)
 				with multiprocessing.Pool(processes=4) as pool: # Set the number of worker processes here
-					results = pool.map(extended_calculate_per_node, data.list_nodes_thresh_techniques)
+					results = pool.map(extended_calculate_per_node, data.labels.nodes.node_thresh_tuple)
 
 			elif PARALLELIZE == 2:
 				with concurrent.futures.ProcessPoolExecutor(max_workers=5) as executor:
 
 					# Submit each item in the input list to the executor
-					futures = [executor.submit(extended_calculate_per_node, nt) for nt in data.list_nodes_thresh_techniques]
+					futures = [executor.submit(extended_calculate_per_node, nt) for nt in data.labels.nodes.node_thresh_tuple]
 
 					# Wait for all jobs to complete
 					done, _ = concurrent.futures.wait(futures)
@@ -1470,10 +1238,10 @@ class DataMerged:
 @dataclass
 class Metrics:
 	metrics_comparison:  pd.DataFrame
-	config:	   			argparse.Namespace
-	approach: 		   str
-	baseline: 		   DataMerged
-	proposed: 		   DataMerged
+	config  : argparse.Namespace
+	approach: str
+	baseline: DataMerged
+	proposed: DataMerged
 
 	@property
 	def metrics(self):
@@ -1702,9 +1470,9 @@ class AIM1_1_TorchXrayVision():
 			torch.backends.cudnn.deterministic = True
 			torch.backends.cudnn.benchmark     = False
 
-	def threshold(self, data_mode='train'):
-
-		data = self.train if data_mode == 'train' else self.test
+	def threshold(self, data_mode = DataModes.TRAIN):
+		
+		data = self.train if data_mode == DataModes.TRAIN else self.test
 
 		exp_stage_list   = [ExperimentSTAGE.ORIGINAL.name       , ExperimentSTAGE.NEW.name]
 		thresh_tech_list = [ThreshTechList.PRECISION_RECALL.name, ThreshTechList.ROC.name]
@@ -1712,7 +1480,7 @@ class AIM1_1_TorchXrayVision():
 		df = pd.DataFrame(  index=data.ORIGINAL.threshold.index ,
 							columns=pd.MultiIndex.from_product([thresh_tech_list, exp_stage_list]) )
 
-		for th_tqn in ['ROC' , 'PRECISION_RECALL']:
+		for th_tqn in [ThreshTechList.ROC.value , ThreshTechList.PRECISION_RECALL.value]:
 			df[ (th_tqn,ExperimentSTAGE.ORIGINAL.name) ] = data.ORIGINAL.threshold[th_tqn]
 			df[ (th_tqn,ExperimentSTAGE.NEW.name     ) ] = data.NEW     .threshold[th_tqn]
 
@@ -1723,7 +1491,7 @@ class AIM1_1_TorchXrayVision():
 
 		findings = getattr(data,WHICH_RESULTS)
 
-		if node in data.labels.list_not_null_nodes:
+		if node in data.labels.nodes.not_null:
 			thresh = findings.threshold[thresh_technique][node]
 			pred   = (findings.pred [node] >= thresh)
 			truth  = (findings.truth[node] >= 0.5 )
@@ -1731,11 +1499,11 @@ class AIM1_1_TorchXrayVision():
 
 		return np.nan
 
-	def accuracy(self, data_mode='train') -> pd.DataFrame:
+	def accuracy(self, data_mode=DataModes.TRAIN) -> pd.DataFrame:
 
-		data 	    = getattr(self, data_mode)
+		data 	    = getattr(self, data_mode.value)
 		pathologies = self.model.pathologies
-		columns 	= pd.MultiIndex.from_product([Data.list_thresh_techniques, data.list_findings_names])
+		columns 	= pd.MultiIndex.from_product([ThreshTechList, data.list_findings_names])
 		df 			= pd.DataFrame(index=pathologies , columns=columns)
 
 		for node in pathologies:
@@ -1744,13 +1512,13 @@ class AIM1_1_TorchXrayVision():
 
 		return df.replace(np.nan, '')
 
-	def findings_per_node(self, node, data_mode='train'):
+	def findings_per_node(self, node, data_mode=DataModes.TRAIN):
 
-		data = self.train if data_mode == 'train' else self.test
+		data = self.train if data_mode == DataModes.TRAIN else self.test
 
 		# Getting the hierarchy_penalty for node
-		hierarchy_penalty = pd.DataFrame(columns=Data.list_thresh_techniques)
-		for x in Data.list_thresh_techniques:
+		hierarchy_penalty = pd.DataFrame(columns=ThreshTechList)
+		for x in ThreshTechList:
 			hierarchy_penalty[x] = data.hierarchy_penalty[x,node]
 
 		# Getting Metrics for node
@@ -1760,15 +1528,15 @@ class AIM1_1_TorchXrayVision():
 
 		return Hierarchy.OUTPUT(hierarchy_penalty=hierarchy_penalty, metrics=metrics, data=data)
 
-	def findings_per_node_iterator(self, data_mode='train'):
+	def findings_per_node_iterator(self, data_mode=DataModes.TRAIN):
 
-		data = self.train if data_mode == 'train' else self.test
+		data = self.train if data_mode == DataModes.TRAIN else self.test
 
 		return iter( [ self.findings_per_node(node)  for node in data.Hierarchy_cls.parent_dict.keys() ] )
 
-	def findings_per_node_with_respect_to_their_parent(self, node, thresh_technq = 'ROC', data_mode='train'):
+	def findings_per_node_with_respect_to_their_parent(self, node, thresh_technq = 'ROC', data_mode=DataModes.TRAIN):
 
-		data = self.train if data_mode == 'train' else self.test
+		data = self.train if data_mode == DataModes.TRAIN else self.test
 
 		N = data.Hierarchy_cls.G.nodes
 		parent_child = data.Hierarchy_cls.parent_dict[node] + [node]
@@ -1786,7 +1554,7 @@ class AIM1_1_TorchXrayVision():
 
 	@staticmethod
 	def calculating_Threshold_and_Metrics(DATA): # type: (Findings) -> Findings
-		for x in Data.list_thresh_techniques:
+		for x in ThreshTechList:
 			for node in DATA.pathologies:
 				DATA = AIM1_1_TorchXrayVision.calculating_Threshold_and_Metrics_per_node( node=node, findings=DATA, thresh_technique=x )
 
@@ -1819,7 +1587,7 @@ class AIM1_1_TorchXrayVision():
 		truth_notnull = findings.truth[node][non_null].to_numpy()
 
 		if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-			# for thresh_technique in Data.list_thresh_techniques:
+			# for thresh_technique in ThreshTechList:
 			pred = findings.pred[node] if findings.experiment_stage == ExperimentSTAGE.ORIGINAL else findings.pred[thresh_technique,node]
 			pred_notnull = pred[non_null].to_numpy()
 
@@ -1839,24 +1607,24 @@ class AIM1_1_TorchXrayVision():
 			with pd.ExcelWriter(path, engine='openpyxl') as writer:
 
 				# Loop through the data modes
-				for data_mode in ['train', 'test']:
-					self.get_metric(metric=metric, data_mode=data_mode).to_excel(writer, sheet_name=data_mode)
+				for data_mode in DataModes.members():
+					self.get_metric(metric=metric, data_mode=data_mode).to_excel(writer, sheet_name=data_mode.value)
 
 				# Save the Excel file
 				# writer.save()
 
 
 
-	def get_metric(self, metric='AUC', data_mode='train') -> pd.DataFrame:
+	def get_metric(self, metric='AUC', data_mode=DataModes.TRAIN) -> pd.DataFrame:
 
-		data: Data = self.train if data_mode == 'train' else self.test
+		data: Data = self.train if data_mode == DataModes.TRAIN else self.test
 
-		column_names = data.labels.list_nodes_impacted
+		column_names = data.labels.nodes.impacted
 
-		columns = pd.MultiIndex.from_product([Data.list_thresh_techniques, [ ExperimentSTAGE.ORIGINAL, ExperimentSTAGE.NEW]], names=['thresh_technique', 'WR'])
+		columns = pd.MultiIndex.from_product([ThreshTechList, [ ExperimentSTAGE.ORIGINAL, ExperimentSTAGE.NEW]], names=['thresh_technique', 'WR'])
 		df = pd.DataFrame(index=data.ORIGINAL.pathologies, columns=columns)
 
-		for x in Data.list_thresh_techniques:
+		for x in ThreshTechList:
 			if hasattr(data.ORIGINAL, 'metrics'):
 				df[x, ExperimentSTAGE.ORIGINAL] = data.ORIGINAL.metrics[x].T[metric]
 			if hasattr(data.NEW, 'metrics'):
@@ -1924,7 +1692,7 @@ class AIM1_1_TorchXrayVision():
 				AIM1_1_TorchXrayVision.run_full_experiment(approach=approach, dataset_name=dataset_name.name)
 
 	@classmethod
-	def get_merged_data(cls, data_mode='test', approach='logit', thresh_technique='DEFAULT', datasets_list=None): # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
+	def get_merged_data(cls, data_mode=DataModes.TEST, approach='logit', thresh_technique='DEFAULT', datasets_list=None): # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
 
 		if datasets_list is None:
 			datasets_list = DatasetList
@@ -1938,7 +1706,7 @@ class AIM1_1_TorchXrayVision():
 				data['pred'].append(metric.pred[thresh_technique] if method==ExperimentSTAGE.NEW else metric.pred)
 				data['truth'].append(metric.truth)
 				data['yhat'].append(data['pred'][-1] >= metric.metrics[thresh_technique].T['Threshold'].T )
-				data['list_nodes_impacted'].append(getattr(a1, data_mode).labels.list_nodes_impacted)
+				data['list_nodes_impacted'].append(getattr(a1, data_mode).labels.nodes.impacted)
 
 			return DataMerged(data)
 
@@ -1948,7 +1716,7 @@ class AIM1_1_TorchXrayVision():
 		return baseline, proposed
 
 	@classmethod
-	def get_all_metrics(cls, datasets_list=['CheX', 'NIH', 'PC'], data_mode='test', thresh_technique='DEFAULT', jupyter=True, **kwargs): # type: (list, str, str, bool, dict) -> MetricsAllTechniques
+	def get_all_metrics(cls, datasets_list=['CheX', 'NIH', 'PC'], data_mode=DataModes.TEST, thresh_technique='DEFAULT', jupyter=True, **kwargs): # type: (list, str, str, bool, dict) -> MetricsAllTechniques
 
 		config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
 		save_path = pathlib.Path(f'tables/metrics_all_datasets/{thresh_technique}')
@@ -2026,7 +1794,7 @@ class AIM1_1_TorchXrayVision():
 		return MetricsAllTechniques(loss=loss, logit=logit, auc_acc_f1=auc_acc_f1, thresh_technique=thresh_technique, datasets_list=datasets_list, data_mode=data_mode)
 
 	@classmethod
-	def get_all_metrics_all_thresh_techniques(cls, datasets_list: list[str]=['CheX', 'NIH', 'PC'], data_mode: str='test') -> MetricsAllTechniquesThresholds:
+	def get_all_metrics_all_thresh_techniques(cls, datasets_list: list[str]=['CheX', 'NIH', 'PC'], data_mode: str=DataModes.TEST) -> MetricsAllTechniquesThresholds:
 
 		output = {}
 		for x in tqdm(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
@@ -2057,10 +1825,8 @@ class AIM1_1_TorchXrayVision():
 			elif check_what == 'd_data': 	 return DT.d_data
 			elif check_what == 'show_graph': DT.train.Hierarchy_cls.show(package=kwargs['package'])
 
-	def visualize(self, data_mode='test', thresh_technique='DEFAULT', **kwargs):
-		assert data_mode in ('train', 'test')
-		assert thresh_technique in Data.list_thresh_techniques
-		return Visualize(data=getattr(self, data_mode), thresh_technique=thresh_technique, config=self.config, **kwargs)
+	def visualize(self, data_mode=DataModes.TEST, thresh_technique='DEFAULT', **kwargs):
+		return Visualize(data=getattr(self, data_mode.value), thresh_technique=thresh_technique, config=self.config, **kwargs)
 
 # endregion
 
@@ -2166,7 +1932,7 @@ class Tables:
 	def __init__(self, jupyter=True, **kwargs):
 		self.config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
 
-	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode='test', thresh_technique='DEFAULT'):
+	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode=DataModes.TEST, thresh_technique='DEFAULT'):
 
 		save_path = self.config.local_path.joinpath(f'tables/metrics_per_dataset/{thresh_technique}/metrics_{data_mode}.xlsx')
 
@@ -2182,7 +1948,7 @@ class Tables:
 					getattr(metrics, m).to_excel(writer, sheet_name=m.upper())
 
 		def get():
-			columns = pd.MultiIndex.from_product([Data.list_datasets,['baseline', 'on_logit', 'on_loss']], names=['dataset', 'approach'])
+			columns = pd.MultiIndex.from_product([DatasetList.members(),['baseline', 'on_logit', 'on_loss']], names=['dataset', 'approach'])
 			auc = pd.DataFrame(columns=columns)
 			f1  = pd.DataFrame(columns=columns)
 			acc = pd.DataFrame(columns=columns)
@@ -2249,10 +2015,10 @@ class Tables:
 				return df2.apply(combine_PA_AP, axis=1)
 
 
-			columns = pd.MultiIndex.from_product( [[ExperimentSTAGE.ORIGINAL, 'updated'], Data.list_datasets])
+			columns = pd.MultiIndex.from_product( [[ExperimentSTAGE.ORIGINAL, 'updated'], DatasetList.members()])
 			df = pd.DataFrame(columns=columns)
 
-			for mode, dname in itertools.product([ExperimentSTAGE.ORIGINAL, 'updated'], Data.list_datasets):
+			for mode, dname in itertools.product([ExperimentSTAGE.ORIGINAL, 'updated'], DatasetList.members()):
 				df[(mode, dname)] = get_PA_AP(mode=mode, dname=dname)
 
 			return df
@@ -2273,7 +2039,7 @@ class Visualize:
 
 
 	@staticmethod
-	def plot_class_relationships(config, method='TSNE', data_mode='test', feature_maps=None , labels=None): # type: (argparse.Namespace, str, str, Optional[np.ndarray], Optional[Labels]) -> None
+	def plot_class_relationships(config, method='TSNE', data_mode=DataModes.TEST, feature_maps=None , labels=None): # type: (argparse.Namespace, str, str, Optional[np.ndarray], Optional[Labels]) -> None
 
 		path_main = config.local_path.joinpath(f'{config.MLFlow_run_name}/class_relationship')
 
@@ -2350,19 +2116,19 @@ class Visualize:
 
 
 	@classmethod
-	def loop(cls, experiment='roc_curve', data_mode='test'):
+	def loop(cls, experiment='roc_curve', data_mode=DataModes.TEST):
 
 		import itertools
 		multiprocessing.set_start_method('spawn', force=True)
 		from tqdm.notebook import tqdm
 
 		if experiment == 'roc_curve':
-			inputs_list = list( itertools.product(Data.list_thresh_techniques, ['loss', 'logit'], Data.list_datasets) )
+			inputs_list = list( itertools.product(ThreshTechList, ['loss', 'logit'], DatasetList.members()) )
 			with multiprocessing.Pool(processes=len(inputs_list)) as pool:
 				pool.map(cls.plot_roc_curves_objective_function, inputs_list)
 
 		elif experiment == 'class_relationship':
-			for dataset_name in tqdm(Data.list_datasets):
+			for dataset_name in tqdm(DatasetList.members()):
 				# Also plot the merged datasets figure
 				cls.plot_class_relationships_objective_function(dataset_name=dataset_name, data_mode=data_mode)
 
@@ -2381,7 +2147,7 @@ class Visualize:
 			columns = pd.MultiIndex.from_product( [['ACC', 'AUC', 'F1'], ['baseline', 'loss', 'logit']])
 			metric_df = {}
 			for thresh_technique in ['DEFAULT', 'ROC', 'PRECISION_RECALL']:
-				output = AIM1_1_TorchXrayVision.get_all_metrics(datasets_list=['CheX', 'NIH', 'PC'], data_mode='test', thresh_technique=thresh_technique)
+				output = AIM1_1_TorchXrayVision.get_all_metrics(datasets_list=['CheX', 'NIH', 'PC'], data_mode=DataModes.TEST, thresh_technique=thresh_technique)
 				metric_df[thresh_technique] = pd.DataFrame(columns=columns)
 				for metric in ['ACC', 'AUC', 'F1']:
 					df = pd.DataFrame(dict( baseline=output.loss.baseline.auc_acc_f1.T[metric], loss=output.loss.proposed.auc_acc_f1.T[metric], logit=output.logit.proposed.auc_acc_f1.T[metric]))
