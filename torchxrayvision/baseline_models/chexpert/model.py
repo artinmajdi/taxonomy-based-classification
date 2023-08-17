@@ -165,7 +165,7 @@ class Tasks2Models(object):
             config_path: Path to configuration JSON file.
 
         Returns:
-            task2models: Dictionary mapping task names to list of dicts.
+            task2models: Dictionary mapping task members to list of dicts.
                 Each dict has keys 'ckpt_path' and 'model_uncertainty'.
             aggregation_fn: Aggregation function to combine predictions from multiple models.
         """

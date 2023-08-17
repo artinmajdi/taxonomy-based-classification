@@ -1,7 +1,6 @@
 import argparse
 import concurrent.futures
 import contextlib
-import itertools
 import json
 import multiprocessing
 import os
@@ -12,261 +11,28 @@ import sys
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
-import networkx as nx
 import numpy as np
 import pandas as pd
 import pingouin as pg
-import plotly.graph_objs as go
 import seaborn as sns
 import sklearn
 import torch
 import torchvision
-import umap
 from hyperopt import fmin, hp, tpe
 from matplotlib import pyplot as plt
 from scipy import stats
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.data_classes import Data, Findings, Labels
-from taxonomy.fixed_params import ExperimentSTAGE, DatasetList, ThreshTechList, DataModes, MethodNames
+from taxonomy.utilities.data import Data, Findings, Hierarchy
+from taxonomy.utilities.model import LoadModelXRV
+from taxonomy.utilities.params import ExperimentStageNames, DatasetNames, ThreshTechList, DataModes, MethodNames, \
+	EvaluationMetricNames, ModelNames, NodeData
 
-# region
 USE_CUDA = torch.cuda.is_available()
 
-class Hierarchy:
-
-	taxonomy_structure = { 'Lung Opacity'              : ['Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'],
-							'Enlarged Cardiomediastinum': ['Cardiomegaly']}
-	# 'Infiltration'              : ['Consolidation'],
-	# 'Consolidation'             : ['Pneumonia'],
-
-	class OUTPUT(NamedTuple):
-		hierarchy_penalty: pd.DataFrame
-		metrics: Union[dict, pd.DataFrame]
-		data: Union[ pd.DataFrame, Dict[str, pd.DataFrame] ]
-
-	def __init__(self, classes=None):
-
-		if classes is None:
-			classes = []
-
-		self.classes = list( set(classes) )
-
-		# Creating the taxonomy for the dataset
-		self.hierarchy = self.create_hierarchy(self.classes)
-
-		# Creating the Graph
-		self.G = Hierarchy.create_graph(classes=self.classes, hierarchy=self.hierarchy)
-
-	@staticmethod
-	def create_graph(classes, hierarchy):
-		G = nx.DiGraph(hierarchy)
-		G.add_nodes_from(classes)
-		return G
-
-	def update_graph(self, classes=None, findings_original=None, findings_new=None, hyperparameters=None):
-
-		def add_nodes_and_edges(hierarchy=None):
-			if classes and len( classes ) > 0: self.G.add_nodes_from( classes )
-			if hierarchy and len( hierarchy ) > 0: self.G.add_edges_from( hierarchy )
-
-		def add_hyperparameters_to_graph():
-			for parent_node, child_node in self.G.edges:
-				self.G.edges[parent_node, child_node]['hyperparameters'] = { x: hyperparameters[x][child_node].copy() for x in ThreshTechList }
-
-		def graph_add_findings_original_to_nodes(findings: dict):
-
-			# Loop over all classes (aka nodes)
-			for n in findings['truth'].columns:
-
-				data = pd.DataFrame(
-					dict( truth=findings['truth'][n], pred=findings['pred'][n], logit=findings['logit'][n],
-						  loss=findings['loss'][n] ) )
-
-				metrics = { }
-				for x in ThreshTechList:
-					metrics[x] = findings['metrics'][x, n]
-
-				# Adding the findings to the graph node
-				self.G.nodes[n][ExperimentSTAGE.ORIGINAL] = dict( data=data, metrics=metrics )
-
-		def graph_add_findings_new_to_nodes(findings: dict):
-
-			# Loop over all classes (aka nodes)
-			for n in findings['truth'].columns:
-
-				# Merging the pred, truth, and loss into a dataframe
-				data, metrics, hierarchy_penalty = { }, { }, pd.DataFrame()
-				for x in ThreshTechList:
-					data[x] = pd.DataFrame(
-						dict( truth=findings['truth'][n], pred=findings['pred'][x, n], loss=findings['loss'][x, n] ) )
-					metrics[x] = findings['metrics'][x, n]
-					hierarchy_penalty[x] = findings['hierarchy_penalty'][x, n].values
-
-				# Adding the findings to the graph node
-				self.G.nodes[n][ExperimentSTAGE.NEW] = dict( data=data, metrics=metrics )
-
-				# Updating the graph with the hierarchy_penalty for the current node
-				self.G.nodes[n]['hierarchy_penalty'] = hierarchy_penalty
-
-
-		if classes           : add_nodes_and_edges()
-		if hyperparameters   : add_hyperparameters_to_graph()
-		if findings_new      : graph_add_findings_new_to_nodes(findings_new)
-		if findings_original : graph_add_findings_original_to_nodes(findings_original)
-
-	def add_hyperparameters_to_node(self, parent, child, a=1.0, b=0.0):  # type: (str, str, float, float) -> None
-		self.G.edges[parent, child]['a'] = a
-		self.G.edges[parent, child]['b'] = b
-
-	def graph_get_taxonomy_hyperparameters(self, parent_node, child_node):  # type: (str, str) -> Tuple[float, float]
-		return self.G.edges[parent_node, child_node]['hyperparameters']
-
-	@ staticmethod
-	def get_node_original_results_for_child_and_parent_nodes(G, node, thresh_technique='ROC'): # type: (nx.DiGraph, str, str) -> Tuple[Dict[str, Any], Dict[str, Any]]
-
-		# The predicted probability p ,  true label y, optimum threshold th, and loss for node class
-		child_data =Hierarchy.get_findings_for_node(G=G , node=node, thresh_technique=thresh_technique, WHICH_RESULTS=ExperimentSTAGE.ORIGINAL)
-
-		# The predicted probability p ,  true label y, optimum threshold th, and loss for parent class
-		parent_node = Hierarchy.get_parent_node(G=G , node=node)
-		parent_data = Hierarchy.get_findings_for_node( G=G , node=parent_node , thresh_technique=thresh_technique, WHICH_RESULTS=ExperimentSTAGE.ORIGINAL) if parent_node else None
-
-		return child_data, parent_data
-
-	@staticmethod
-	def get_findings_for_node(G, node, thresh_technique, WHICH_RESULTS): # type: (nx.DiGraph, str, str, ExperimentSTAGE) -> Hierarchy.OUTPUT
-
-		WR = WHICH_RESULTS
-		TT = thresh_technique
-
-		node_data = G.nodes[node]
-
-		if WR == ExperimentSTAGE.ORIGINAL:
-			data    = node_data[WR]['data'   ]
-			metrics = node_data[WR]['metrics'][TT]
-			hierarchy_penalty  = None
-		elif WR == ExperimentSTAGE.NEW:
-			data    = node_data[WR]['data'   ][TT]
-			metrics = node_data[WR]['metrics'][TT]
-			hierarchy_penalty  = node_data['hierarchy_penalty']
-		else:
-			raise ValueError('WHICH_RESULTS must be either ORIGINAL or NEW')
-
-		return Hierarchy.OUTPUT( data=data, metrics=metrics, hierarchy_penalty=hierarchy_penalty )
-
-	@staticmethod
-	def get_parent_node(G, node): # type: (nx.DiGraph, str) -> str
-		parent_node = nx.dag.ancestors(G, node)
-		return list(parent_node)[0] if len(parent_node)>0 else None
-
-	# @staticmethod
-	# def taxonomy_structure(self):
-	# 	# 'Infiltration'              : ['Consolidation'],
-	# 	# 'Consolidation'             : ['Pneumonia'],
-	# 	return {
-	# 			'Lung Opacity'              : ['Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'],
-	# 			'Enlarged Cardiomediastinum': ['Cardiomegaly'],
-	# 			}
-
-	@property
-	def parent_dict(self):
-		p_dict = defaultdict(list)
-		for parent_i, its_children in self.hierarchy.items():
-			for child in its_children:
-				p_dict[child].append(parent_i)
-		return p_dict
-
-	@property
-	def child_dict(self):
-		return self.hierarchy
-
-	@property
-	def list_nodes_exist_in_taxonomy(self):
-		LPI = set()
-		for key, value in Hierarchy.taxonomy_structure.items():
-			LPI.update([key])
-			LPI.update(value)
-
-		return LPI.intersection( set(self.classes) )
-
-	def create_hierarchy(self, classes: list):
-
-		UT = defaultdict(list)
-
-		# Looping through all parent classes in the DEFAULT taxonomy
-		for parent in Hierarchy.taxonomy_structure.keys():
-
-			# Check if the parent class of our DEFAULT taxonomy exist in the dataset
-			if parent in classes:
-				for child in Hierarchy.taxonomy_structure[parent]:
-
-					# Checks if the child classes of found parent class existi in the dataset
-					if child in classes:
-						UT[parent].append(child)
-
-		return UT or None
-
-	@property
-	def parent_child_df(self):
-		df = pd.DataFrame(columns=['parent' , 'child'])
-		for p in self.hierarchy.keys():
-			for c in self.hierarchy[p]:
-				df = df.append({'parent': p, 'child': c}, ignore_index=True)
-		return df
-
-	def show(self, package='networkx', **kwargs):
-
-		def plot_networkx_digraph(G):
-			pos = nx.spring_layout( G )
-			edge_x = []
-			edge_y = []
-			for edge in G.edges():
-				x0, y0 = pos[edge[0]]
-				x1, y1 = pos[edge[1]]
-				edge_x.append( x0 )
-				edge_x.append( x1 )
-				edge_x.append( None )
-				edge_y.append( y0 )
-				edge_y.append( y1 )
-				edge_y.append( None )
-
-			edge_trace = go.Scatter( x=edge_x, y=edge_y, line=dict( width=0.5, color='#888' ), hoverinfo='none', mode='lines' )
-
-			node_x = [pos[node][0] for node in G.nodes()]
-			node_y = [pos[node][1] for node in G.nodes()]
-
-			node_trace = go.Scatter( x=node_x, y=node_y, mode='markers', hoverinfo='text',
-									 marker=dict(showscale=True, colorscale='Viridis', reversescale=True, color=[], size=10, line_width=2, colorbar=dict(thickness=15, title='Node Connections', xanchor='left', titleside='right')) )
-
-			node_adjacencies = []
-			node_text        = []
-			for node, adjacencies in enumerate( G.adjacency() ):
-				node_adjacencies.append( len( adjacencies[1] ) )
-				node_text.append( f'{adjacencies[0]} - # of connections: {len( adjacencies[1] )}' )
-
-			node_trace.marker.color = node_adjacencies
-			node_trace.text         = node_text
-
-			# Add node labels
-			annotations = []
-			for node in G.nodes():
-				x, y = pos[node]
-				annotations.append(go.layout.Annotation(text=str( node ), x=x, y=y, showarrow=False, font=dict( size=10, color='black' )))
-
-			fig = go.Figure( data=[edge_trace, node_trace],
-							 layout=go.Layout( title='Networkx DiGraph', showlegend=False, hovermode='closest', margin=dict(b=20,l=5,r=5,t=40), xaxis=dict(showgrid=False, zeroline=False, showticklabels=False), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), annotations=annotations ))
-			fig.show()
-
-		if package == 'networkx':
-			sns.set_style("whitegrid")
-			nx.draw(self.G, with_labels=True)
-
-		elif package == 'plotly':
-			plot_networkx_digraph(self.G)
 
 class SaveFile:
 	def __init__(self, path):
@@ -330,7 +96,7 @@ class LoadSaveFindings:
 	def save(self, data, **kwargs):
 		SaveFile(self.path).dump(data, **kwargs)
 
-	def load(self, source='load_MLFlow', run_name=None, run_id=None, **kwargs):
+	def load(self, **kwargs):
 		return SaveFile(self.path).load(**kwargs)
 
 class LoadChestXrayDatasets:
@@ -443,7 +209,6 @@ class LoadChestXrayDatasets:
 		d_name = self.config.dataset_name
 		if d_name in dataset_config:
 			self.d_data = dataset_config.get(d_name)(**params_config.get(d_name))
-
 
 	def relabel_raw_database(self):
 		# Adding the PatientID if it doesn't exist
@@ -656,118 +421,9 @@ class LoadChestXrayDatasets:
 		return LD
 
 
-class LoadModelXRV:
-	def __init__(self, config):
-		self.model 		: Optional[torch.nn.Module] = None
-		self.model_name : str 					    = self.fix_model_name(config.model_name)
-		self.config 	 : argparse.Namespace	     = config
-
-	def load(self, op_threshs: bool=False) -> torch.nn.Module:
-		""" 224x224 models """
-		model_name = self.model_name
-
-		
-		get_model = lambda pre_trained_model_weights: xrv.models.DenseNet( weights=pre_trained_model_weights, apply_sigmoid=False )
-
-		if   model_name == 'NIH'      : model = get_model('densenet121-res224-nih')
-		elif model_name == 'RSNA'     : model = get_model('densenet121-res224-rsna')
-		elif model_name == 'PC'       : model = get_model('densenet121-res224-pc')
-		elif model_name == 'CheX'     : model = get_model('densenet121-res224-chex')
-		elif model_name == 'MIMIC_NB' : model = get_model('densenet121-res224-mimic_nb')
-		elif model_name == 'MIMIC_CH' : model = get_model('densenet121-res224-mimic_ch')
-		elif model_name == 'ALL_224'  : model = get_model('densenet121-res224-all')
-		elif model_name == 'ALL_512'  : model = get_model('resnet50-res512-all')
-		elif model_name == 'baseline_jfhealthcare' : model = xrv.baseline_models.jfhealthcare.DenseNet()
-		elif model_name == 'baseline_CheX'         : model = xrv.baseline_models.chexpert.DenseNet(weights_zip=self.config.path_baseline_CheX_weights.as_posix())
-		elif model_name == 'Openi'                 : model = None
-		elif model_name == 'NLMTB'                 : model = None
-		elif model_name == 'VinBrain'              : model = None
-		else									   : model = None
-
-		if not op_threshs:
-			model.op_threshs = None
-
-		# Enabling CUDA
-		if USE_CUDA:
-			model.cuda()
-
-		self.model = model
-
-		return self.model
-
-	@staticmethod
-	def fix_model_name(model_name) -> str:
-		mapping = dict(nih 					 ='NIH',
-						rsna                  = 'RSNA',
-						pc                    = 'PC'                   , padchest = 'PC',
-						chex                  = 'CheX'                 , chexpert = 'CheX',
-						mimic_nb              = 'MIMIC_NB',
-						mimic_ch              = 'MIMIC_CH',
-						all_224               = 'ALL_224',
-						all_512               = 'ALL_512',
-						baseline_jfhealthcare = 'baseline_jfhealthcare',
-						baseline_chex         = 'baseline_CheX',
-						openi                 = 'Openi',
-						nlmtb                 = 'NLMTB',
-						vinbrain              = 'VinBrain')
-		return mapping[model_name.lower()]
-
-	@property
-	def xrv_op_threshs(self):
-		return xrv.models.model_urls[self.model_name.lower()]['op_threshs']
-
-	@property
-	def xrv_labels(self):
-		return xrv.models.model_urls[self.model_name]['labels']
-
-	@property
-	def all_models_available(self):
-		return ['NIH', 'RSNA', 'PC', 'CheX', 'MIMIC_NB', 'MIMIC_CH', 'ALL_224', 'ALL_512', 'baseline_jfhealthcare', 'baseline_CheX']
-
-	@classmethod
-	def extract_feature_maps(cls, config, data_mode=DataModes.TEST): # type: (argparse.Namespace, str) -> Tuple[np.ndarray, pd.DataFrame]
-
-		LM = cls(config)
-		model = LM.load()
-
-		LD = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
-		LD.load()
-		data = getattr(LD, data_mode)
-
-		def process_one_batch(batch_data):
-
-			# Getting the data and its corresponding true labels
-			device = 'cuda' if USE_CUDA else 'cpu'
-			images = batch_data["img" ].to(device)
-
-			# Get feature maps
-			feats = model.features2(images) if hasattr(model, "features2") else model.features(images)
-			return feats.reshape(len(feats),-1).detach().cpu(), batch_data["lab" ].to(device).detach().cpu()
-
-		def looping_over_all_batches(data_loader, n_batches_to_process) -> Tuple[np.ndarray, np.ndarray]:
-
-			d_features, d_truth  = [], []
-			for batch_idx, batch_data in enumerate(tqdm(data_loader)):
-				if n_batches_to_process and (batch_idx >= n_batches_to_process):
-					break
-				features, truth = process_one_batch(batch_data)
-				d_features.append(features)
-				d_truth.append(truth)
-
-			return np.concatenate(d_features), np.concatenate(d_truth)
-
-		with torch.no_grad(): # inference_mode no_grad
-			feature_maps, truth = looping_over_all_batches(data_loader=data.data_loader, n_batches_to_process=config.n_batches_to_process)
-
-		return feature_maps , pd.DataFrame(truth, columns=model.pathologies), data.labels.nodes.not_null
-
-# endregion
-
-
-# region Main
 class CalculateOriginalFindings:
 
-	def __init__(self, data, model, config, criterion=torch.nn.BCELoss(reduction='none')): # type: (Data, torch.nn.Module, argparse.Namespace, torch.nn.Module) -> None
+	def __init__(self, data, model, config, criterion=torch.nn.BCELoss(reduction='none')):  # type: (Data, torch.nn.Module, argparse.Namespace, torch.nn.Module) -> None
 		self.device 			  = 'cuda' if USE_CUDA else 'cpu'
 		self.criterion            = criterion
 		self.n_batches_to_process = config   .n_batches_to_process
@@ -775,11 +431,11 @@ class CalculateOriginalFindings:
 		self.config               = config
 		self.save_path_full       = f'details/{config.MLFlow_run_name}/baseline/findings_original_{data.data_mode}.pkl'
 
-		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage=ExperimentSTAGE.ORIGINAL)
+		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage=ExperimentStageNames.ORIGINAL)
 		self.data = data
 
 	@staticmethod
-	def calculate(data, model, n_batches_to_process, device='cpu', criterion=torch.nn.BCELoss(reduction='none')): # type: (Data, torch.nn.Module, int, str, torch.nn.Module) -> Data
+	def calculate(data, model, n_batches_to_process, device='cpu', criterion=torch.nn.BCELoss(reduction='none')):  # type: (Data, torch.nn.Module, int, str, torch.nn.Module) -> Data
 
 		model.eval()
 
@@ -849,9 +505,9 @@ class CalculateOriginalFindings:
 			looping_over_all_batches()
 
 			# Measuring AUCs & Thresholds
-			data.ORIGINAL = AIM1_1_TorchXrayVision.calculating_Threshold_and_Metrics(data.ORIGINAL)
+			data.ORIGINAL = TaxonomyXRV.calculating_threshold_and_metrics(data.ORIGINAL)
 
-		data.ORIGINAL.results = { key: getattr( data.ORIGINAL, key ) for key in ['metrics', 'pred', 'logit', 'truth', 'loss'] }
+		data.ORIGINAL.results = {key: getattr( data.ORIGINAL, key ) for key in ['metrics', 'pred', 'logit', 'truth', 'loss']}
 		return data
 
 	def do_calculate(self):
@@ -876,7 +532,8 @@ class CalculateOriginalFindings:
 		if config.do_findings_original == 'calculate':
 			OG.do_calculate()
 		else:
-			OG.data.ORIGINAL.results = LoadSaveFindings( config, OG.save_path_full ).load( source=config.do_findings_original, run_name=config.MLFlow_run_name )
+			OG.data.ORIGINAL.results = LoadSaveFindings( config, OG.save_path_full ).load(
+			)
 
 			# Adding the ORIGINAL findings to the graph nodes
 			OG.data.Hierarchy_cls.update_graph( findings_original=OG.data.ORIGINAL.results )
@@ -885,27 +542,27 @@ class CalculateOriginalFindings:
 
 
 class CalculateNewFindings:
-	def __init__(self, model, data, hyperparameters, config, approach): # type: (torch.nn.Module, Data, dict, argparse.Namespace, str) -> None
+	def __init__(self, model: torch.nn.Module, data: Data, hyperparameters: dict, config: argparse.Namespace, methodName: MethodNames):
 
 		self.model            = model
 		self.hyperparameters  = hyperparameters
-		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage=ExperimentSTAGE.NEW)
+		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage=ExperimentStageNames.NEW)
 		self.data             = data
-		config.approach       = approach
+		config.methodName     = methodName
 		self.config           = config
-		self.save_path_full   = f'details/{config.MLFlow_run_name}/{approach}/findings_new_{data.data_mode}.pkl'
+		self.save_path_full   = f'details/{config.MLFlow_run_name}/{methodName}/findings_new_{data.data_mode}.pkl'
 
 	@staticmethod
-	def get_hierarchy_penalty_for_node(G, node, thresh_technique, parent_condition_mode, approach, a, b=0) -> np.ndarray:
+	def get_hierarchy_penalty_for_node(G, node, thresh_technique, parent_condition_mode, methodName, a, b=0) -> np.ndarray:
 		""" Return:   hierarchy_penalty: Array(index=sample_indices) """
 
 		def calculate_H(parent_node: str) -> np.ndarray:
 			""" Return:   hierarchy_penalty: Array(index=sample_indices) """
 
 			def calculate_raw_weight(pdata) -> pd.Series:
-				if   approach in ['1', 'logit']: return pd.Series(a * pdata.data.logit.to_numpy()    , index=pdata.data.index)
-				elif approach in ['2', 'loss']:  return pd.Series(a * pdata.data.loss.to_numpy() + b , index=pdata.data.index)
-				else: raise ValueError(' approach is not supproted')
+				if   methodName is MethodNames.LOGIT_BASED: return pd.Series(a * pdata.data.logit.to_numpy(), index=pdata.data.index)
+				elif methodName is MethodNames.LOSS_BASED:  return pd.Series(a * pdata.data.loss.to_numpy() + b, index=pdata.data.index)
+				else: raise ValueError(' methodName is not supproted')
 
 			def apply_parent_doesnot_exist_condition(hierarchy_penalty: pd.Series, pdata) -> np.ndarray:
 
@@ -923,9 +580,9 @@ class CalculateNewFindings:
 				return hierarchy_penalty.to_numpy()
 
 			# Getting the parent data
-			pdata = Hierarchy.get_findings_for_node(G=G, node=parent_node, WHICH_RESULTS=ExperimentSTAGE.ORIGINAL, thresh_technique=thresh_technique)
+			pdata = Hierarchy.get_findings_for_node(G=G, node=parent_node, experimentStage=ExperimentStageNames.ORIGINAL, thresh_technique=thresh_technique)
 
-			# Calculating the initial hierarchy_penalty based on "a" , "b" and "approach"
+			# Calculating the initial hierarchy_penalty based on "a" , "b" and "methodName"
 			hierarchy_penalty = calculate_raw_weight(pdata)
 
 			# Cleaning up the hierarchy_penalty for the current node: Setting the hierarchy_penalty to 1 for samples where the parent class exist, and Nan if the parent label is Nan
@@ -933,12 +590,12 @@ class CalculateNewFindings:
 
 		def set_H_to_be_ineffective() -> np.ndarray:
 
-			ndata = Hierarchy.get_findings_for_node(G=G , node=node, thresh_technique=thresh_technique , WHICH_RESULTS=ExperimentSTAGE.ORIGINAL)
+			ndata = Hierarchy.get_findings_for_node(G=G, node=node, thresh_technique=thresh_technique, experimentStage=ExperimentStageNames.ORIGINAL)
 
-			if   approach in ['1', 'logit']: return np.zeros(len(ndata.data.index))
-			elif approach in ['2', 'loss' ]: return np.ones(len(ndata.data.index))
+			if   methodName is MethodNames.LOGIT_BASED: return np.zeros(len(ndata.data.index))
+			elif methodName is MethodNames.LOSS_BASED:  return np.ones(len(ndata.data.index))
 
-			raise ValueError(' approach is not supproted')
+			raise ValueError(' methodName is not supproted')
 
 		# Get the parent node of the current node. We assume that each node can only have one parent to aviod complications in theoretical calculations.
 		parent_node = Hierarchy.get_parent_node(G=G, node=node)
@@ -947,14 +604,14 @@ class CalculateNewFindings:
 		return calculate_H(parent_node) if parent_node else set_H_to_be_ineffective()
 
 	@staticmethod
-	def do_approach(config, w, ndata): # type: (argparse.Namespace, pd.Series, Hierarchy.OUTPUT) -> Tuple[np.ndarray, np.ndarray]
+	def do_approach(config, w, ndata):  # type: (argparse.Namespace, pd.Series, Hierarchy.OUTPUT) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
 
 		def do_approach2_per_node():
 
-			def calculate_loss_gradient(p, y): # type: (np.ndarray, np.ndarray) -> pd.Series
+			def calculate_loss_gradient(p, y):  # type: (np.ndarray, np.ndarray) -> pd.Series
 				return -y / (p + 1e-7) + (1 - y) / (1 - p + 1e-7)
 
-			def update_pred(l_new, l_gradient): # type: (pd.Series, pd.Series) -> pd.Series
+			def update_pred(l_new, l_gradient):  # type: (pd.Series, pd.Series) -> pd.Series
 				p_new = np.exp( -l_new )
 				condition = l_gradient >= 0
 				p_new[condition] = 1 - p_new[condition]
@@ -981,19 +638,20 @@ class CalculateNewFindings:
 
 			return pred_new.to_numpy(), logit_new.to_numpy()
 
-
-		if  config.approach in ('1', 'logit'):
+		if  config.methodName is MethodNames.LOGIT_BASED:
 			pred_new, logit_new = do_approach1_per_node()
 			loss_new = np.ones(pred_new.shape) * np.nan
 
-		elif config.approach in ('2', 'loss') :
+		elif config.methodName is MethodNames.LOSS_BASED:
 			pred_new, loss_new  = do_approach2_per_node()
 			logit_new = np.ones(pred_new.shape) * np.nan
+		else:
+			raise ValueError(' methodName is not supported')
 
 		return pred_new, logit_new, loss_new
 
 	@staticmethod
-	def calculate_per_node(node, data, config, hyperparameters, thresh_technique): # type: (str, Data, argparse.Namespace, Dict[str, pd.DataFrame], str) -> Data
+	def calculate_per_node(node: str, data: Data, config: argparse.Namespace, hyperparameters: Dict[ThreshTechList, pd.DataFrame], thresh_technique: ThreshTechList) -> Data:
 
 		x = thresh_technique
 		G = data.Hierarchy_cls.G
@@ -1013,20 +671,20 @@ class CalculateNewFindings:
 		initialization()
 
 		# Getting the hierarchy_penalty for the node
-		a, b = hyperparameters[x].loc['a',node], hyperparameters[x].loc['b',node]
-		data.NEW.hierarchy_penalty[x,node] = CalculateNewFindings.get_hierarchy_penalty_for_node( G=G, a=a, b=b, node=node, thresh_technique=x, parent_condition_mode=config.parent_condition_mode, approach=config.approach )
+		a, b = hyperparameters[x].loc['a', node], hyperparameters[x].loc['b',node]
+		data.NEW.hierarchy_penalty[x, node] = CalculateNewFindings.get_hierarchy_penalty_for_node( G=G, a=a, b=b, node=node, thresh_technique=x, parent_condition_mode=config.parent_condition_mode, methodName=config.methodName )
 
 		# Getting node data
-		ndata: Hierarchy.OUTPUT = Hierarchy.get_findings_for_node( G=G, node=node, thresh_technique=x, WHICH_RESULTS=ExperimentSTAGE.ORIGINAL )
+		ndata: NodeData = Hierarchy.get_findings_for_node(G=G, node=node, thresh_technique=x, experimentStage=ExperimentStageNames.ORIGINAL)
 
-		data.NEW.pred[x,node], data.NEW.logit[x,node], data.NEW.loss[x,node] = CalculateNewFindings.do_approach( config=config, w=data.NEW.hierarchy_penalty[x][node], ndata=ndata )
+		data.NEW.pred[x, node], data.NEW.logit[x, node], data.NEW.loss[x, node] = CalculateNewFindings.do_approach( config=config, w=data.NEW.hierarchy_penalty[x][node], ndata=ndata )
 
-		data.NEW = AIM1_1_TorchXrayVision.calculating_Threshold_and_Metrics_per_node( node=node, findings=data.NEW, thresh_technique=x )
+		data.NEW = TaxonomyXRV.calculating_threshold_and_metrics_per_node(node=node, findings=data.NEW, thresh_technique=x)
 
 		return data
 
 	@staticmethod
-	def calculate(data, config, hyperparameters): # type: (Data, argparse.Namespace, Dict[str, pd.DataFrame]) -> Data
+	def calculate(data, config, hyperparameters):  # type: (Data, argparse.Namespace, Dict[str, pd.DataFrame]) -> Data
 
 		def initialization():
 
@@ -1049,7 +707,7 @@ class CalculateNewFindings:
 			for node in data.labels.nodes.not_null:
 				data = CalculateNewFindings.calculate_per_node( node=node, data=data, config=config, hyperparameters=hyperparameters, thresh_technique=x )
 
-		data.NEW.results = { key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', 'loss', 'hierarchy_penalty'] }
+		data.NEW.results = {key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', MethodNames.LOSS_BASED.name, 'hierarchy_penalty']}
 
 		return data
 
@@ -1066,15 +724,16 @@ class CalculateNewFindings:
 		LoadSaveFindings(self.config, self.save_path_full).save( self.data.NEW.results )
 
 	@classmethod
-	def get_updated_data(cls, model, data, hyperparameters, config, approach):  # type: (torch.nn.Module, Data, dict, argparse.Namespace, str) -> Data
+	def get_updated_data(cls, model: torch.nn.Module, data: Data, hyperparameters: dict, config: argparse.Namespace, methodName: MethodNames) -> Data:
 
 		# Initializing the class
-		NEW = cls(model=model, data=data, hyperparameters=hyperparameters, config=config, approach=approach)
+		NEW = cls(model=model, data=data, hyperparameters=hyperparameters, config=config, methodName=methodName)
 
 		if config.do_findings_new == 'calculate':
 			NEW.do_calculate()
 		else:
-			NEW.data.NEW.results = LoadSaveFindings( NEW.config, NEW.save_path_full ).load( source=config.do_findings_new, run_name=config.MLFlow_run_name )
+			NEW.data.NEW.results = LoadSaveFindings( NEW.config, NEW.save_path_full ).load(
+			)
 
 			# Adding the ORIGINAL findings to the graph nodes
 			NEW.data.Hierarchy_cls.update_graph( findings_new=NEW.data.NEW.results )
@@ -1084,19 +743,19 @@ class CalculateNewFindings:
 
 class HyperParameterTuning:
 
-	def __init__(self, config, data , model): # type: (argparse.Namespace, Data, torch.nn.Module) -> None
+	def __init__(self, config, data , model):  # type: (argparse.Namespace, Data, torch.nn.Module) -> None
 
 		self.config      = config
 		self.data 		 = data
 		self.model       = model
-		self.save_path_full = f'details/{config.MLFlow_run_name}/{config.approach}/hyperparameters.pkl'
+		self.save_path_full = f'details/{config.MLFlow_run_name}/{config.methodName}/hyperparameters.pkl'
 		self.hyperparameters = None
 
 		# Initializing the data.NEW
 		if data.NEW is None:
-			data.initialize_findings(pathologies=model.pathologies, experiment_stage=ExperimentSTAGE.NEW)
+			data.initialize_findings(pathologies=model.pathologies, experiment_stage=ExperimentStageNames.NEW)
 
-	def initial_hyperparameters(self, a=0.0 , b=1.0): # type: (float, float) -> Dict[str, pd.DataFrame]
+	def initial_hyperparameters(self, a=0.0 , b=1.0):  # type: (float, float) -> Dict[str, pd.DataFrame]
 		return {th: pd.DataFrame( {n:dict(a=a,b=b) for n in self.model.pathologies} ) for th in ThreshTechList}
 
 	@staticmethod
@@ -1124,13 +783,13 @@ class HyperParameterTuning:
 		return [ best['a'] , best['b'] ]
 
 	@staticmethod
-	def calculate(initial_hp, config, data): # type: (Dict[str, pd.DataFrame], argparse.Namespace, Data) -> Dict[str, pd.DataFrame]
+	def calculate(initial_hp, config, data):  # type: (Dict[str, pd.DataFrame], argparse.Namespace, Data) -> Dict[str, pd.DataFrame]
 
 		def extended_calculate_per_node(nt: List[str]) -> List[Union[str, float]]:
 			hyperparameters_updated = HyperParameterTuning.calculate_per_node( node=nt[0], thresh_technique=nt[1],data=data, config=config, hyperparameters=deepcopy(initial_hp))
 			return [nt[0], nt[1]] + hyperparameters_updated # type: ignore
 
-		def update_hyperparameters(results_in): # type: ( List[Tuple[str, str, List[float]]] ) -> Dict[str, pd.DataFrame]
+		def update_hyperparameters(results_in):  # type: ( List[Tuple[str, str, List[float]]] ) -> Dict[str, pd.DataFrame]
 			# Creating a copy of initial hyperparameters
 			hp_in = initial_hp.copy()
 
@@ -1156,7 +815,7 @@ class HyperParameterTuning:
 
 			elif PARALLELIZE == 1:
 				multiprocessing.set_start_method('spawn', force=True)
-				with multiprocessing.Pool(processes=4) as pool: # Set the number of worker processes here
+				with multiprocessing.Pool(processes=4) as pool:  # Set the number of worker processes here
 					results = pool.map(extended_calculate_per_node, data.labels.nodes.node_thresh_tuple)
 
 			elif PARALLELIZE == 2:
@@ -1206,7 +865,7 @@ class HyperParameterTuning:
 		if config.do_hyperparameters in ('DEFAULT' ,'calculate'):
 			HP.do_calculate()
 		else:
-			HP.hyperparameters = LoadSaveFindings(config, HP.save_path_full).load(source=config.do_hyperparameters, run_name=config.MLFlow_run_name)
+			HP.hyperparameters = LoadSaveFindings(config, HP.save_path_full).load()
 
 			# Adding the ORIGINAL findings to the graph nodes
 			HP.data.Hierarchy_cls.update_graph(hyperparameters=HP.hyperparameters)
@@ -1233,13 +892,14 @@ class DataMerged:
 		self.truth = pd.concat(data['truth'],axis=0).reset_index(drop=True)
 		self.yhat  = pd.concat(data['yhat'], axis=0).reset_index(drop=True).astype(int)
 		self.list_nodes_impacted = [n for n in self.pred.columns if n in set().union(*data['list_nodes_impacted'])]
-		self.auc_acc_f1 		 = pd.DataFrame(columns=self.pred.columns, index=['AUC', 'ACC', 'F1'])
+		self.auc_acc_f1 		 = pd.DataFrame(columns=self.pred.columns, index=EvaluationMetricNames.members())
+
 
 @dataclass
 class Metrics:
 	metrics_comparison:  pd.DataFrame
 	config  : argparse.Namespace
-	approach: str
+	methodName: str
 	baseline: DataMerged
 	proposed: DataMerged
 
@@ -1278,14 +938,14 @@ class MetricsAllTechniques:
 				plt.savefig(save_path.joinpath( f'metrics_AUC_ACC_F1.{format}'), format=format, dpi=300)
 
 		def barplot():
-			fig, axes = plt.subplots(1, 3, figsize=(21, 7), sharey=True)
+			fig, axes = plt.subplots(1, 3, figsize=(21, 7), sharey=True)  # type: ignore
 			sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True, rc=None)
 
 			params = dict(legend=False, fontsize=16, kind='barh')
 
-			self.metrics['ACC'].plot(ax=axes[0], title='ACC', **params)
-			self.metrics['AUC'].plot(ax=axes[1], title='AUC', **params)
-			self.metrics['F1'].plot(ax=axes[2], title='F1', **params)
+			self.metrics[EvaluationMetricNames.ACC.name].plot(ax=axes[0], title=EvaluationMetricNames.ACC.name, **params)
+			self.metrics[EvaluationMetricNames.AUC.name].plot(ax=axes[1], title=EvaluationMetricNames.AUC.name, **params)
+			self.metrics[EvaluationMetricNames.F1.name].plot(ax=axes[2], title=EvaluationMetricNames.F1.name, **params)
 			plt.legend(loc='upper right', fontsize=16)
 			plt.tight_layout()
 
@@ -1296,25 +956,25 @@ class MetricsAllTechniques:
 
 			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
 
-			fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=True)
+			fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=True)  # type: ignore
 			params = dict(annot=True, fmt=".3f", linewidths=.5, cmap='YlGnBu', cbar=False, annot_kws={"size": fontsize})
 
-			for i, m in enumerate(['ACC', 'AUC', 'F1']):
+			for i, m in enumerate(EvaluationMetricNames.members()):
 
 				sns.heatmap(data=self.metrics[m],ax=axes[i], **params)
 				axes[i].set_title(m, fontsize=int(1.5*fontsize), fontweight='bold')
 				axes[i].tick_params(axis='both', which='major', labelsize=fontsize)
 
-				# sns.heatmap(data=self.metrics['ACC'],ax=axes[0], **params)
-				# axes[0].set_title('ACC', fontsize=int(1.5*fontsize), fontweight='bold')
+				# sns.heatmap(data=self.metrics[EvaluationMetricNames.ACC.name],ax=axes[0], **params)
+				# axes[0].set_title(EvaluationMetricNames.ACC.name, fontsize=int(1.5*fontsize), fontweight='bold')
 				# axes[0].tick_params(axis='both', which='major', labelsize=fontsize)
 
-				# sns.heatmap(data=self.metrics['AUC'], ax=axes[1], **params)
-				# axes[1].set_title('AUC', fontsize=int(1.5*fontsize), fontweight='bold')
+				# sns.heatmap(data=self.metrics[EvaluationMetricNames.AUC.name], ax=axes[1], **params)
+				# axes[1].set_title(EvaluationMetricNames.AUC.name, fontsize=int(1.5*fontsize), fontweight='bold')
 				# axes[1].tick_params(axis='both', which='major', labelsize=fontsize)
 
-				# sns.heatmap(data=self.metrics['F1'] , ax=axes[2], **params)
-				# axes[2].set_title('F1', fontsize=int(1.5*fontsize), fontweight='bold')
+				# sns.heatmap(data=self.metrics[EvaluationMetricNames.F1.name] , ax=axes[2], **params)
+				# axes[2].set_title(EvaluationMetricNames.F1.name, fontsize=int(1.5*fontsize), fontweight='bold')
 				# axes[2].tick_params(axis='both', which='major', labelsize=fontsize)
 
 			plt.tight_layout()
@@ -1329,9 +989,9 @@ class MetricsAllTechniques:
 		def save_plot():
 			save_path = self.config.local_path.joinpath( f'figures/roc_curve_all_datasets/{self.thresh_technique}/')
 			save_path.mkdir(parents=True, exist_ok=True)
-			for format in ['png', 'eps', 'svg', 'pdf']:
+			for ft in ['png', 'eps', 'svg', 'pdf']:
 				plt.savefig(save_path.joinpath(
-					f'roc_curve_all_datasets.{format}'), format=format, dpi=300)
+					f'roc_curve_all_datasets.{ft}'), format=ft, dpi=300)
 
 		# Set up the grid
 		def setup_plot():
@@ -1339,13 +999,12 @@ class MetricsAllTechniques:
 			# Set a seaborn style for visually appealing plots
 			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
 
-
 			# Set up the grid
 			n_nodes, n_cols = len(self.list_nodes_impacted), 3
 			n_rows = int(np.ceil(n_nodes / n_cols))
 
 			# Set up the figure and axis
-			fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharey=True, sharex=True)
+			fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharey=True, sharex=True)  # type: ignore
 			axes     = axes.flatten()
 
 
@@ -1364,7 +1023,7 @@ class MetricsAllTechniques:
 			ax      = axes[idx]
 
 			# Calculate the ROC curve and AUC
-			def get_fpr_tpr_auc(pred_node, truth_node, technique, roc_auc):
+			def get_fpr_tpr_auc(pred_node, truth_node, technique: MethodNames, roc_auc):
 
 				def get():
 					# mask = ~truth_node.isnull()
@@ -1384,8 +1043,12 @@ class MetricsAllTechniques:
 			lines, labels = [], []
 
 			truth = self.logit.proposed.truth
-			for technique, data in [('baseline', self.logit.baseline), ('logit', self.logit.proposed), ('loss', self.loss.proposed)]:
-				line = get_fpr_tpr_auc( pred_node=data.pred[node], truth_node=truth[node], technique=technique, roc_auc=data.auc_acc_f1[node]['AUC'])
+			for methodName in EvaluationMetricNames.members():
+				
+				data = getattr(self, methodName.lower())
+				technique = MethodNames[methodName]
+				
+				line = get_fpr_tpr_auc(pred_node=data.pred[node], truth_node=truth[node], technique=technique, roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name])
 				lines.append(line.lines[-1])
 				labels.append(line.get_legend_handles_labels()[1][-1])
 
@@ -1414,7 +1077,6 @@ class MetricsAllTechniques:
 
 			plt.tight_layout()
 
-
 		# Loop through each disease and plot the ROC curve
 		for idx, node in enumerate(self.list_nodes_impacted):
 			plot_per_node(node, idx)
@@ -1428,13 +1090,13 @@ class MetricsAllTechniques:
 
 
 @dataclass
-class MetricsAllTechniquesThresholds:
+class MetricsAllTechniqueThresholds:
 	DEFAULT: 		  MetricsAllTechniques
 	ROC: 			  MetricsAllTechniques
 	PRECISION_RECALL: MetricsAllTechniques
 
 
-class AIM1_1_TorchXrayVision():
+class TaxonomyXRV:
 
 	def __init__(self, config: argparse.Namespace, seed: int=10):
 
@@ -1445,15 +1107,14 @@ class AIM1_1_TorchXrayVision():
 		self.model          : Optional[torch.nn.Module]           = None
 		self.d_data         : Optional[xrv.datasets.CheX_Dataset] = None
 
-		approach = config.approach if hasattr(config, 'approach') else 'loss'
-		self.save_path : str = f'details/{config.MLFlow_run_name}/{approach}'
+		methodName = config.methodName or EvaluationMetricNames.LOSS
+		self.save_path : str = f'details/{config.MLFlow_run_name}/{methodName}'
 
 		# Setting the seed
-		self.setting_random_seeds_for_PyTorch(seed=seed)
-
+		self.setting_random_seeds_for_pytorch(seed=seed)
 
 	@staticmethod
-	def measuring_BCE_loss(p, y):
+	def measuring_bce_loss(p, y):
 		return -( y * np.log(p) + (1 - y) * np.log(1 - p) )
 
 	@staticmethod
@@ -1462,7 +1123,7 @@ class AIM1_1_TorchXrayVision():
 		return p*(1-p)
 
 	@staticmethod
-	def setting_random_seeds_for_PyTorch(seed=10):
+	def setting_random_seeds_for_pytorch(seed=10):
 		np.random.seed(seed)
 		torch.manual_seed(seed)
 		if USE_CUDA:
@@ -1474,22 +1135,22 @@ class AIM1_1_TorchXrayVision():
 		
 		data = self.train if data_mode == DataModes.TRAIN else self.test
 
-		exp_stage_list   = [ExperimentSTAGE.ORIGINAL.name       , ExperimentSTAGE.NEW.name]
+		exp_stage_list   = [ExperimentStageNames.ORIGINAL.name       , ExperimentStageNames.NEW.name]
 		thresh_tech_list = [ThreshTechList.PRECISION_RECALL.name, ThreshTechList.ROC.name]
 		
-		df = pd.DataFrame(  index=data.ORIGINAL.threshold.index ,
-							columns=pd.MultiIndex.from_product([thresh_tech_list, exp_stage_list]) )
+		df = pd.DataFrame(  index   = data.ORIGINAL.threshold.index ,
+							columns = pd.MultiIndex.from_product([thresh_tech_list, exp_stage_list]) )
 
 		for th_tqn in [ThreshTechList.ROC.value , ThreshTechList.PRECISION_RECALL.value]:
-			df[ (th_tqn,ExperimentSTAGE.ORIGINAL.name) ] = data.ORIGINAL.threshold[th_tqn]
-			df[ (th_tqn,ExperimentSTAGE.NEW.name     ) ] = data.NEW     .threshold[th_tqn]
+			df[ (th_tqn, ExperimentStageNames.ORIGINAL.name)] = data.ORIGINAL.threshold[th_tqn]
+			df[ (th_tqn, ExperimentStageNames.NEW.name)] = data.NEW     .threshold[th_tqn]
 
 		return df.replace(np.nan, '')
 
 	@staticmethod
-	def accuracy_per_node(data, node, WHICH_RESULTS, thresh_technique) -> float:
+	def accuracy_per_node(data, node, experimentStage, thresh_technique) -> float:
 
-		findings = getattr(data,WHICH_RESULTS)
+		findings = getattr(data,experimentStage)
 
 		if node in data.labels.nodes.not_null:
 			thresh = findings.threshold[thresh_technique][node]
@@ -1508,7 +1169,7 @@ class AIM1_1_TorchXrayVision():
 
 		for node in pathologies:
 			for xf in columns:
-				df.loc[node, xf] = AIM1_1_TorchXrayVision.accuracy_per_node(data=data, node=node, thresh_technique=xf[0], WHICH_RESULTS=xf[1])
+				df.loc[node, xf] = TaxonomyXRV.accuracy_per_node(data=data, node=node, thresh_technique=xf[0], experimentStage=xf[1])
 
 		return df.replace(np.nan, '')
 
@@ -1523,7 +1184,7 @@ class AIM1_1_TorchXrayVision():
 
 		# Getting Metrics for node
 		metrics = pd.DataFrame()
-		for m in ['AUC','ACC','F1']:
+		for m in EvaluationMetricNames.members():
 			metrics[m] = self.get_metric(metric=m, data_mode=data_mode).T[node]
 
 		return Hierarchy.OUTPUT(hierarchy_penalty=hierarchy_penalty, metrics=metrics, data=data)
@@ -1534,36 +1195,36 @@ class AIM1_1_TorchXrayVision():
 
 		return iter( [ self.findings_per_node(node)  for node in data.Hierarchy_cls.parent_dict.keys() ] )
 
-	def findings_per_node_with_respect_to_their_parent(self, node, thresh_technq = 'ROC', data_mode=DataModes.TRAIN):
+	def findings_per_node_with_respect_to_their_parent(self, node, thresh_technic: ThreshTechList = ThreshTechList.ROC, data_mode=DataModes.TRAIN):
 
 		data = self.train if data_mode == DataModes.TRAIN else self.test
 
 		N = data.Hierarchy_cls.G.nodes
 		parent_child = data.Hierarchy_cls.parent_dict[node] + [node]
 
-		df = pd.DataFrame(index=N[node][ ExperimentSTAGE.ORIGINAL ][ 'data' ].index , columns=pd.MultiIndex.from_product(  [  parent_child,['truth' , 'pred' , 'loss'],[ExperimentSTAGE.ORIGINAL,ExperimentSTAGE.NEW]  ] ))
+		df = pd.DataFrame(index=N[node][ ExperimentStageNames.ORIGINAL]['data'].index, columns=pd.MultiIndex.from_product([parent_child, ['truth' , 'pred' , 'loss'], ExperimentStageNames.members()]))
 
 		for n in parent_child:
 			for dtype in ['truth' , 'pred' , 'loss']:
-				df[ (n, dtype, ExperimentSTAGE.ORIGINAL)] = N[n][ ExperimentSTAGE.ORIGINAL ][ 'data' ][dtype].values
-				df[ (n , dtype, ExperimentSTAGE.NEW)]     = N[n][ ExperimentSTAGE.NEW ][ 'data' ][thresh_technq][dtype].values
+				df[ (n, dtype, ExperimentStageNames.ORIGINAL)] = N[n][ ExperimentStageNames.ORIGINAL]['data'][dtype].values
+				df[ (n , dtype, ExperimentStageNames.NEW)]     = N[n][ ExperimentStageNames.NEW]['data'][thresh_technic][dtype].values
 
-			df[(n, 'hierarchy_penalty', ExperimentSTAGE.NEW)] = N[n][ 'hierarchy_penalty' ][thresh_technq].values
+			df[(n, 'hierarchy_penalty', ExperimentStageNames.NEW)] = N[n]['hierarchy_penalty'][thresh_technic].values
 
 		return df.round(decimals=3).replace(np.nan, '', regex=True)
 
 	@staticmethod
-	def calculating_Threshold_and_Metrics(DATA): # type: (Findings) -> Findings
+	def calculating_threshold_and_metrics(DATA):  # type: (Findings) -> Findings
 		for x in ThreshTechList:
 			for node in DATA.pathologies:
-				DATA = AIM1_1_TorchXrayVision.calculating_Threshold_and_Metrics_per_node( node=node, findings=DATA, thresh_technique=x )
+				DATA = TaxonomyXRV.calculating_threshold_and_metrics_per_node(node=node, findings=DATA, thresh_technique=x)
 
 		return DATA
 
 	@staticmethod
-	def calculating_Threshold_and_Metrics_per_node(node, findings, thresh_technique):  # type: (str, Findings, str) -> Findings
+	def calculating_threshold_and_metrics_per_node(node: str, findings: Findings, thresh_technique: ThreshTechList) -> Findings:
 
-		def calculating_optimal_Thresholds(y, yhat, x):
+		def calculating_optimal_thresholds(y, yhat, x):
 
 			if x == 'DEFAULT':
 				findings.metrics[x,node]['Threshold'] = 0.5
@@ -1577,10 +1238,10 @@ class AIM1_1_TorchXrayVision():
 				f_score = 2 * (ppv * recall) / (ppv + recall)
 				findings.metrics[x,node]['Threshold'] = th[np.argmax( f_score )]
 
-		def calculating_Metrics(y, yhat, x):
-			findings.metrics[x, node]['AUC'] = sklearn.metrics.roc_auc_score( y, yhat )
-			findings.metrics[x, node]['ACC'] = sklearn.metrics.accuracy_score( y, yhat >= findings.metrics[x, node]['Threshold'] )
-			findings.metrics[x, node]['F1']  = sklearn.metrics.f1_score      ( y, yhat >= findings.metrics[x, node]['Threshold'] )
+		def calculating_metrics(y, yhat, x):
+			findings.metrics[x, node][EvaluationMetricNames.AUC.name] = sklearn.metrics.roc_auc_score(y, yhat)
+			findings.metrics[x, node][EvaluationMetricNames.ACC.name] = sklearn.metrics.accuracy_score(y, yhat >= findings.metrics[x, node]['Threshold'])
+			findings.metrics[x, node][EvaluationMetricNames.F1.name]  = sklearn.metrics.f1_score      (y, yhat >= findings.metrics[x, node]['Threshold'])
 
 		# Finding the indices where the truth is not nan
 		non_null = ~np.isnan( findings.truth[node] )
@@ -1588,17 +1249,17 @@ class AIM1_1_TorchXrayVision():
 
 		if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
 			# for thresh_technique in ThreshTechList:
-			pred = findings.pred[node] if findings.experiment_stage == ExperimentSTAGE.ORIGINAL else findings.pred[thresh_technique,node]
+			pred = findings.pred[node] if findings.experiment_stage == ExperimentStageNames.ORIGINAL else findings.pred[thresh_technique,node]
 			pred_notnull = pred[non_null].to_numpy()
 
-			calculating_optimal_Thresholds( y = truth_notnull, yhat = pred_notnull, x = thresh_technique )
-			calculating_Metrics( y            = truth_notnull, yhat = pred_notnull, x = thresh_technique )
+			calculating_optimal_thresholds(y = truth_notnull, yhat = pred_notnull, x = thresh_technique)
+			calculating_metrics(y            = truth_notnull, yhat = pred_notnull, x = thresh_technique)
 
 		return findings
 
 	def save_metrics(self):
 
-		for metric in ['AUC', 'ACC', 'F1', 'Threshold']:
+		for metric in EvaluationMetricNames.members() + ['Threshold']:
 
 			# Saving the data
 			path = self.config.local_path.joinpath( f'{self.save_path}/{metric}.xlsx' )
@@ -1607,7 +1268,7 @@ class AIM1_1_TorchXrayVision():
 			with pd.ExcelWriter(path, engine='openpyxl') as writer:
 
 				# Loop through the data modes
-				for data_mode in DataModes.members():
+				for data_mode in DataModes:
 					self.get_metric(metric=metric, data_mode=data_mode).to_excel(writer, sheet_name=data_mode.value)
 
 				# Save the Excel file
@@ -1615,20 +1276,20 @@ class AIM1_1_TorchXrayVision():
 
 
 
-	def get_metric(self, metric='AUC', data_mode=DataModes.TRAIN) -> pd.DataFrame:
+	def get_metric(self, metric: EvaluationMetricNames=EvaluationMetricNames.AUC, data_mode: DataModes=DataModes.TRAIN) -> pd.DataFrame:
 
 		data: Data = self.train if data_mode == DataModes.TRAIN else self.test
 
 		column_names = data.labels.nodes.impacted
 
-		columns = pd.MultiIndex.from_product([ThreshTechList, [ ExperimentSTAGE.ORIGINAL, ExperimentSTAGE.NEW]], names=['thresh_technique', 'WR'])
+		columns = pd.MultiIndex.from_product([ThreshTechList, ExperimentStageNames.members()], names=['thresh_technique', 'WR'])
 		df = pd.DataFrame(index=data.ORIGINAL.pathologies, columns=columns)
 
 		for x in ThreshTechList:
 			if hasattr(data.ORIGINAL, 'metrics'):
-				df[x, ExperimentSTAGE.ORIGINAL] = data.ORIGINAL.metrics[x].T[metric]
+				df[x, ExperimentStageNames.ORIGINAL] = data.ORIGINAL.metrics[x].T[metric.name]
 			if hasattr(data.NEW, 'metrics'):
-				df[x, ExperimentSTAGE.NEW] = data.NEW     .metrics[x].T[metric]
+				df[x, ExperimentStageNames.NEW] = data.NEW     .metrics[x].T[metric.name]
 
 		df = df.apply(pd.to_numeric, errors='ignore').round(3).replace(np.nan, '')
 
@@ -1648,10 +1309,10 @@ class AIM1_1_TorchXrayVision():
 		return LD.train, LD.test, model, LD.d_data
 
 	@classmethod
-	def run_full_experiment(cls, approach='loss', seed=10, **kwargs):
+	def run_full_experiment(cls, methodName=MethodNames.LOSS_BASED, seed=10, **kwargs):
 
 		# Getting the user arguments
-		config = reading_user_input_arguments(jupyter=True, approach=approach, **kwargs)
+		config = reading_user_input_arguments(jupyter=True, methodName=methodName, **kwargs)
 
 		# Initializing the class
 		FE = cls(config=config, seed=seed)
@@ -1674,8 +1335,8 @@ class AIM1_1_TorchXrayVision():
 
 		# Measuring the updated metrics (predictions and losses, thresholds, aucs, etc.)
 		param_dict = {key: getattr(FE, key) for key in ['model', 'config', 'hyperparameters']}
-		FE.train = CalculateNewFindings.get_updated_data(data=FE.train, approach=approach, **param_dict)
-		FE.test  = CalculateNewFindings.get_updated_data(data=FE.test , approach=approach, **param_dict)
+		FE.train = CalculateNewFindings.get_updated_data(data=FE.train, methodName=methodName, **param_dict)
+		FE.test  = CalculateNewFindings.get_updated_data(data=FE.test , methodName=methodName, **param_dict)
 
 		if FE.config.RUN_MLFlow and FE.config.KILL_MLFlow_at_END:
 			FE.kill_MLFlow()
@@ -1687,56 +1348,56 @@ class AIM1_1_TorchXrayVision():
 
 	@staticmethod
 	def loop_run_full_experiment():
-		for dataset_name in DatasetList:
-			for approach in ['logit', 'loss']:
-				AIM1_1_TorchXrayVision.run_full_experiment(approach=approach, dataset_name=dataset_name.name)
+		for dataset_name in DatasetNames.members():
+			for methodName in MethodNames:
+				TaxonomyXRV.run_full_experiment(methodName=methodName, dataset_name=dataset_name)
 
 	@classmethod
-	def get_merged_data(cls, data_mode=DataModes.TEST, approach='logit', thresh_technique='DEFAULT', datasets_list=None): # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
+	def get_merged_data(cls, data_mode=DataModes.TEST, methodName='logit', thresh_technique='DEFAULT', datasets_list=None):  # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
 
 		if datasets_list is None:
-			datasets_list = DatasetList
+			datasets_list = DatasetNames
 			
-		def get(method: ExperimentSTAGE) -> DataMerged:
+		def get(method: ExperimentStageNames) -> DataMerged:
 			data = defaultdict(list)
 			for dataset_name in datasets_list:
-				a1 = cls.run_full_experiment(approach=approach, dataset_name=dataset_name)
+				a1 = cls.run_full_experiment(methodName=methodName, dataset_name=dataset_name)
 
 				metric = getattr( getattr(a1,data_mode),method.value)
-				data['pred'].append(metric.pred[thresh_technique] if method==ExperimentSTAGE.NEW else metric.pred)
+				data['pred'].append(metric.pred[thresh_technique] if method == ExperimentStageNames.NEW else metric.pred)
 				data['truth'].append(metric.truth)
 				data['yhat'].append(data['pred'][-1] >= metric.metrics[thresh_technique].T['Threshold'].T )
 				data['list_nodes_impacted'].append(getattr(a1, data_mode).labels.nodes.impacted)
 
 			return DataMerged(data)
 
-		baseline = get(ExperimentSTAGE.ORIGINAL)
-		proposed = get(ExperimentSTAGE.NEW)
+		baseline = get(ExperimentStageNames.ORIGINAL)
+		proposed = get(ExperimentStageNames.NEW)
 
 		return baseline, proposed
 
 	@classmethod
-	def get_all_metrics(cls, datasets_list=['CheX', 'NIH', 'PC'], data_mode=DataModes.TEST, thresh_technique='DEFAULT', jupyter=True, **kwargs): # type: (list, str, str, bool, dict) -> MetricsAllTechniques
+	def get_all_metrics(cls, datasets_list=DatasetNames.members(), data_mode=DataModes.TEST, thresh_technique=ThreshTechList.DEFAULT, jupyter=True, **kwargs):  # type: (List[DatasetNames], DataModes, ThreshTechList, bool, dict) -> MetricsAllTechniques
 
 		config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
 		save_path = pathlib.Path(f'tables/metrics_all_datasets/{thresh_technique}')
 
-		def apply_to_approach(approach): # type: (str) -> Metrics
+		def apply_to_approach(methodName: MethodNames) -> Metrics:
 
-			baseline, proposed = cls.get_merged_data(data_mode=data_mode, approach=approach, thresh_technique=thresh_technique, datasets_list=datasets_list)
+			baseline, proposed = cls.get_merged_data(data_mode=data_mode, methodName=methodName, thresh_technique=thresh_technique, datasets_list=datasets_list)
 
-			def get_AUC_ACC_F1(node: str, data: DataMerged):
+			def get_auc_acc_f1(node: str, data: DataMerged):
 
 				# Finding the indices where the truth is not nan
 				non_null = ~np.isnan( data.truth[node] )
 				truth_notnull = data.truth[node][non_null].to_numpy()
 
 				if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-					data.auc_acc_f1[node]['AUC'] = sklearn.metrics.roc_auc_score( data.truth[node][non_null], data.yhat[node][non_null])
-					data.auc_acc_f1[node]['ACC'] = sklearn.metrics.accuracy_score(data.truth[node][non_null], data.yhat[node][non_null])
-					data.auc_acc_f1[node]['F1']  = sklearn.metrics.f1_score( 	 data.truth[node][non_null], data.yhat[node][non_null])
+					data.auc_acc_f1[node][EvaluationMetricNames.AUC.name] = sklearn.metrics.roc_auc_score(data.truth[node][non_null], data.yhat[node][non_null])
+					data.auc_acc_f1[node][EvaluationMetricNames.ACC.name] = sklearn.metrics.accuracy_score(data.truth[node][non_null], data.yhat[node][non_null])
+					data.auc_acc_f1[node][EvaluationMetricNames.F1.name]  = sklearn.metrics.f1_score(data.truth[node][non_null], data.yhat[node][non_null])
 
-			def get_p_value_kappa_cohen_d_BF10(df, node): # type: (pd.DataFrame, str) -> None
+			def get_p_value_kappa_cohen_d_bf10(df, node):  # type: (pd.DataFrame, str) -> None
 
 				# Perform the independent samples t-test
 				df.loc['t_stat',node], df.loc['p_value',node] = stats.ttest_ind( baseline.yhat[node], proposed.yhat[node])
@@ -1750,21 +1411,21 @@ class AIM1_1_TorchXrayVision():
 				df.loc['BF10',node]    = df_ttest['BF10'].values[0]
 
 			metrics_comparison = pd.DataFrame(columns=baseline.pred.columns, index=['kappa', 'p_value', 't_stat', 'power', 'cohen-d','BF10'])
-			# auc_acc_f1_baseline = pd.DataFrame(columns=baseline.pred.columns, index=['AUC', 'ACC', 'F1'])
-			# auc_acc_f1_proposed = pd.DataFrame(columns=baseline.pred.columns, index=['AUC', 'ACC', 'F1'])
+			# auc_acc_f1_baseline = pd.DataFrame(columns=baseline.pred.columns, index=EvaluationMetricNames.members())
+			# auc_acc_f1_proposed = pd.DataFrame(columns=baseline.pred.columns, index=EvaluationMetricNames.members())
 
 			for node in baseline.pred.columns:
-				get_AUC_ACC_F1(node, baseline)
-				get_AUC_ACC_F1(node, proposed)
-				get_p_value_kappa_cohen_d_BF10(metrics_comparison, node)
+				get_auc_acc_f1(node, baseline)
+				get_auc_acc_f1(node, proposed)
+				get_p_value_kappa_cohen_d_bf10(metrics_comparison, node)
 
-			return Metrics(metrics_comparison=metrics_comparison, baseline=baseline, proposed=proposed, config=config, approach=approach)
+			return Metrics(metrics_comparison=metrics_comparison, baseline=baseline, proposed=proposed, config=config, methodName=methodName)
 
-		def get_AUC_ACC_F1_merged(logit, loss): # type: (Metrics, Metrics) -> pd.DataFrame
-			columns = pd.MultiIndex.from_product( [['ACC', 'AUC', 'F1'], ['baseline', 'loss', 'logit']])
+		def get_auc_acc_f1_merged(logit, loss):  # type: (Metrics, Metrics) -> pd.DataFrame
+			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), MethodNames.members()])
 			auc_acc_f1 = pd.DataFrame(columns=columns)
 
-			for metric in ['ACC', 'AUC', 'F1']:
+			for metric in EvaluationMetricNames.members():
 				auc_acc_f1[metric] = pd.DataFrame( dict(baseline=loss.baseline.auc_acc_f1.T[metric],
 														loss=loss.proposed.auc_acc_f1.T[metric],
 														logit=logit.proposed.auc_acc_f1.T[metric] ))
@@ -1772,21 +1433,22 @@ class AIM1_1_TorchXrayVision():
 			return auc_acc_f1
 
 		if config.do_metrics == 'calculate':
-			logit 	   = apply_to_approach('logit')
-			loss  	   = apply_to_approach('loss')
-			auc_acc_f1 = get_AUC_ACC_F1_merged(logit, loss)
+			logit 	   = apply_to_approach(MethodNames.LOGIT_BASED)
+			loss  	   = apply_to_approach(MethodNames.LOSS_BASED)
+			auc_acc_f1 = get_auc_acc_f1_merged(logit, loss)
 
 			# Saving the metrics locally
-			LoadSaveFindings(config, save_path.joinpath('logit_metrics.csv')).save(logit.metrics_comparison[logit.baseline.list_nodes_impacted].T)
-			LoadSaveFindings(config, save_path.joinpath('logit.pkl')).save(logit)
+			LoadSaveFindings(config, save_path / 'logit_metrics.csv').save(logit.metrics_comparison[logit.baseline.list_nodes_impacted].T)
+			LoadSaveFindings(config, save_path / 'logit.pkl').save(logit)
 
-			LoadSaveFindings(config, save_path.joinpath('loss_metrics.csv')).save(loss.metrics_comparison[loss.baseline.list_nodes_impacted].T)
-			LoadSaveFindings(config, save_path.joinpath('loss.pkl')).save(loss)
+			LoadSaveFindings(config, save_path / 'loss_metrics.csv').save(loss.metrics_comparison[loss.baseline.list_nodes_impacted].T)
+			LoadSaveFindings(config, save_path / 'loss.pkl').save(loss)
 
-			LoadSaveFindings(config, save_path.joinpath(f'auc_acc_f1.xlsx')).save(auc_acc_f1, index=True)
+			LoadSaveFindings(config, save_path / 'auc_acc_f1.xlsx').save(auc_acc_f1, index=True)
 
 		else:
-			load_lambda = lambda x, **kwargs: LoadSaveFindings(config, save_path.joinpath(x)).load(source=config.do_metrics, run_name=config.MLFlow_run_name, **kwargs)
+			load_lambda = lambda x, **kwargs: LoadSaveFindings(config, save_path.joinpath(x)).load(
+				**kwargs)
 			logit 	   = load_lambda('logit.pkl')
 			loss 	   = load_lambda('loss.pkl')
 			auc_acc_f1 = load_lambda('auc_acc_f1.xlsx', index_col=0, header=[0, 1])
@@ -1794,13 +1456,13 @@ class AIM1_1_TorchXrayVision():
 		return MetricsAllTechniques(loss=loss, logit=logit, auc_acc_f1=auc_acc_f1, thresh_technique=thresh_technique, datasets_list=datasets_list, data_mode=data_mode)
 
 	@classmethod
-	def get_all_metrics_all_thresh_techniques(cls, datasets_list: list[str]=['CheX', 'NIH', 'PC'], data_mode: str=DataModes.TEST) -> MetricsAllTechniquesThresholds:
+	def get_all_metrics_all_thresh_techniques(cls, datasets_list: list[str]=['CheX', 'NIH', 'PC'], data_mode: str=DataModes.TEST) -> MetricsAllTechniqueThresholds:
 
 		output = {}
 		for x in tqdm(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
-			output[x] = AIM1_1_TorchXrayVision.get_all_metrics(datasets_list=datasets_list, data_mode=data_mode, thresh_technique=x)
+			output[x] = TaxonomyXRV.get_all_metrics(datasets_list=datasets_list, data_mode=data_mode, thresh_technique=x)
 
-		return MetricsAllTechniquesThresholds(**output)
+		return MetricsAllTechniqueThresholds(**output)
 
 	@staticmethod
 	def check(check_what='labels', jupyter=True, **kwargs):
@@ -1825,13 +1487,6 @@ class AIM1_1_TorchXrayVision():
 			elif check_what == 'd_data': 	 return DT.d_data
 			elif check_what == 'show_graph': DT.train.Hierarchy_cls.show(package=kwargs['package'])
 
-	def visualize(self, data_mode=DataModes.TEST, thresh_technique='DEFAULT', **kwargs):
-		return Visualize(data=getattr(self, data_mode.value), thresh_technique=thresh_technique, config=self.config, **kwargs)
-
-# endregion
-
-
-# region Other
 
 def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.json', **kwargs) -> argparse.Namespace:
 
@@ -1852,7 +1507,7 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 					dict(name = 'max_sample'  , type = int, help = 'Maximum number of samples to load' ),
 
 					# Model
-					dict(name='model_name'   , type=str , help='Name of the pre_trained model.' ),
+					dict(name='modelName'   , type=str , help='Name of the pre_trained model.' ),
 					dict(name='architecture' , type=str , help='Name of the architecture'       ),
 
 					# Training
@@ -1863,7 +1518,7 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 
 					# Hyperparameter Optimization
 					dict(name = 'parent_condition_mode', type = str, help = 'Parent condition mode: truth or predicted' ),
-					dict(name = 'approach'             , type = str, help = 'Hyper parameter optimization approach' ),
+					dict(name = 'methodName'             , type = str, help = 'Hyper parameter optimization methodName' ),
 					dict(name = 'max_evals'            , type = int, help = 'Number of evaluations for hyper parameter optimization' ),
 					dict(name = 'n_batches_to_process' , type = int, help = 'Number of batches to process' ),
 
@@ -1894,10 +1549,10 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 				updated_args[key] = kwargs[key]
 		return updated_args
 
-	def get_config(args): # type: (argparse.Namespace) -> argparse.Namespace
+	def get_config(args):  # type: (argparse.Namespace) -> argparse.Namespace
 
 		# Loading the config.json file
-		config_dir =  os.path.join(os.path.dirname(__file__), config_name if jupyter else args.config)
+		config_dir = os.path.join(os.path.dirname(__file__), config_name if jupyter else args.config)
 
 		if os.path.exists(config_dir):
 			with open(config_dir) as f:
@@ -1909,17 +1564,21 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 			# Updating the config with the arguments as command line input
 			updated_args ={key: args_dict.get(key) or values for key, values in config_raw.items() }
 
-			# Updating the config with the arguments as function input: used for facilitating the jupyter notebook access
+			# Updating the config. Used for facilitating the jupyter notebook access
 			updated_args = updating_config_with_kwargs(updated_args, kwargs)
 
 			# Convert the dictionary to a Namespace
 			args = argparse.Namespace(**updated_args)
 
 			# Updating the paths to their absolute path
-			args.local_path 				= pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.local_path)
-			args.dataset_path 			    = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.dataset_path)
+			args.local_path = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.local_path)
+			args.dataset_path = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.dataset_path)
 			args.path_baseline_CheX_weights = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.path_baseline_CheX_weights)
-			args.MLFlow_run_name 			= f'{args.dataset_name}-{args.model_name}'
+			args.MLFlow_run_name = f'{args.dataset_name}-{args.modelName}'
+			
+			args.methodName   = MethodNames[args.methodName.upper()]
+			args.dataset_name = DatasetNames[args.dataset_name.upper()]
+			args.modelName    = ModelNames[args.modelName.upper()]
 
 		return args
 
@@ -1927,249 +1586,5 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 	return  get_config(args=parse_args())
 
 
-class Tables:
-
-	def __init__(self, jupyter=True, **kwargs):
-		self.config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
-
-	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode=DataModes.TEST, thresh_technique='DEFAULT'):
-
-		save_path = self.config.local_path.joinpath(f'tables/metrics_per_dataset/{thresh_technique}/metrics_{data_mode}.xlsx')
-
-		def save(metrics):
-
-			save_path.parent.mkdir(parents=True, exist_ok=True)
-
-			# Create a new Excel writer
-			with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
-
-				# Write each metric to a different worksheet
-				for m in ['auc', 'f1', 'acc']:
-					getattr(metrics, m).to_excel(writer, sheet_name=m.upper())
-
-		def get():
-			columns = pd.MultiIndex.from_product([DatasetList.members(),['baseline', 'on_logit', 'on_loss']], names=['dataset', 'approach'])
-			auc = pd.DataFrame(columns=columns)
-			f1  = pd.DataFrame(columns=columns)
-			acc = pd.DataFrame(columns=columns)
-
-			for dataset_name in ['CheX','NIH','PC']:
-
-				df = AIM1_1_TorchXrayVision.run_full_experiment( approach='logit', dataset_name=dataset_name)
-				auc [ (dataset_name, 'on_logit') ] = getattr(df, data_mode).NEW     .metrics[thresh_technique].loc['AUC' ]
-				f1  [ (dataset_name, 'on_logit') ] = getattr(df, data_mode).NEW     .metrics[thresh_technique].loc['F1'  ]
-				acc [ (dataset_name, 'on_logit') ] = getattr(df, data_mode).NEW     .metrics[thresh_technique].loc['ACC' ]
-
-				auc [ (dataset_name, 'baseline') ] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc['AUC' ]
-				f1  [ (dataset_name, 'baseline') ] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc['F1'  ]
-				acc [ (dataset_name, 'baseline') ] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc['ACC' ]
-
-
-				df = AIM1_1_TorchXrayVision.run_full_experiment( approach='loss', dataset_name=dataset_name)
-				auc [ (dataset_name, 'on_loss' ) ] = getattr(df, data_mode).NEW     .metrics[thresh_technique].loc['AUC' ]
-				f1  [ (dataset_name, 'on_loss' ) ] = getattr(df, data_mode).NEW     .metrics[thresh_technique].loc['F1'  ]
-				acc [ (dataset_name, 'on_loss' ) ] = getattr(df, data_mode).NEW     .metrics[thresh_technique].loc['ACC' ]
-
-
-			auc = auc.apply(pd.to_numeric).round(3).replace(np.nan,'')
-			f1  = f1 .apply(pd.to_numeric).round(3).replace(np.nan,'')
-			acc = acc.apply(pd.to_numeric).round(3).replace(np.nan,'')
-
-			# region load Data & Model
-			class Metrics:
-				def __init__(self, auc=None, acc=None, f1=None, threshold=None):
-					self.auc       = auc
-					self.acc       = acc
-					self.f1        = f1
-					self.threshold = threshold
-
-			return Metrics(auc=auc, f1=f1, acc=acc)
-
-		metrics = get()
-
-		if save_table:
-			save(metrics)
-
-		return metrics
-
-	def get_table_datasets_samples(self, save_table=True):
-
-		save_path = pathlib.Path('tables/metrics_all_datasets/table_datasets_samples.csv')
-
-		def get() -> pd.DataFrame:
-
-			def get_PA_AP(mode: str, dname: str) -> pd.Series:
-
-				combine_PA_AP = lambda row: '' if (not row.PA) and (not row.AP) else f"{row.PA}/{row.AP}"
-
-				df2 = pd.DataFrame(columns=['PA', 'AP'])
-				for views in ['PA', 'AP']:
-
-					# Getting the dataset for a specific view
-					LD = LoadChestXrayDatasets.get_dataset_unfiltered(update_empty_parent_class=(mode=='updated'), dataset_name=dname, views=views)
-					df2[views] = LD.labels.sum(axis=0).astype(int).replace(0, '')
-
-					# Adding the Total row
-					df2.loc['Total', views] = LD.labels.shape[0]
-
-				return df2.apply(combine_PA_AP, axis=1)
-
-
-			columns = pd.MultiIndex.from_product( [[ExperimentSTAGE.ORIGINAL, 'updated'], DatasetList.members()])
-			df = pd.DataFrame(columns=columns)
-
-			for mode, dname in itertools.product([ExperimentSTAGE.ORIGINAL, 'updated'], DatasetList.members()):
-				df[(mode, dname)] = get_PA_AP(mode=mode, dname=dname)
-
-			return df
-
-
-		df = get()
-
-		if save_table:
-			LoadSaveFindings(self.config, save_path).save(df)
-
-		return df
-
-
-class Visualize:
-
-	def __init__(self, jupyter=True, **kwargs):
-		self.config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
-
-
-	@staticmethod
-	def plot_class_relationships(config, method='TSNE', data_mode=DataModes.TEST, feature_maps=None , labels=None): # type: (argparse.Namespace, str, str, Optional[np.ndarray], Optional[Labels]) -> None
-
-		path_main = config.local_path.joinpath(f'{config.MLFlow_run_name}/class_relationship')
-
-		def get_reduced_features(feature_maps, method): # type: (np.ndarray, str) -> np.ndarray
-			if method.upper() == 'UMAP':
-				reducer = umap.UMAP()
-				return reducer.fit_transform(feature_maps)
-
-			elif method.upper() == 'TSNE':
-				from sklearn.manifold import TSNE
-				return TSNE(n_components=2, random_state=42).fit_transform(feature_maps)
-
-		def do_plot(X_embedded, df_truth, method): # type: (np.ndarray, pd.DataFrame, str) -> None
-
-			def save_plot():
-
-				# output path
-				filename = f'class_relationship_{method}'
-				path     = path_main.joinpath(method)
-				path.mkdir(parents=True, exist_ok=True)
-
-				# Save the plot
-				for format in ['png', 'eps', 'svg', 'pdf']:
-					plt.savefig(path.joinpath(f'{filename}.{format}'), format=format, dpi=300)
-
-			colors  = plt.cm.get_cmap('tab20',max(18,len(df_truth.columns)))
-			_, axes = plt.subplots(3, 6, figsize=(20, 10), sharex=True, sharey=True)
-			axes    = axes.flatten()
-
-			for i, node in enumerate(df_truth.columns):
-				class_indices = df_truth[df_truth[node].eq(1)].index.to_numpy()
-				axes[i].scatter(X_embedded[:, 0], X_embedded[:, 1], color='lightgray', alpha=0.2)
-				axes[i].scatter(X_embedded[class_indices, 0], X_embedded[class_indices, 1], c=[colors(i)], alpha=0.5, s=20)
-				axes[i].set_title(node)
-
-			plt.suptitle(f"{method} Visualization for {config.dataset_name} dataset")
-
-			# Save the plot
-			save_plot()
-
-			plt.show()
-
-		# Get feature maps
-		if feature_maps is None:
-			feature_maps, labels, list_not_null_nodes = LoadModelXRV.extract_feature_maps(config=config, data_mode=data_mode)
-			labels = labels[list_not_null_nodes]
-
-		# Get Reduced features
-		X_embedded = get_reduced_features(feature_maps, method)
-
-		# Plot
-		do_plot(X_embedded=X_embedded, df_truth=labels , method=method)
-
-	@staticmethod
-	def plot_class_relationships_objective_function(data_mode, dataset_name):
-
-		config = reading_user_input_arguments(dataset_name=dataset_name)
-
-		feature_maps, labels, list_not_null_nodes = LoadModelXRV.extract_feature_maps(config=config, data_mode=data_mode)
-
-		for method in ['UMAP', 'TSNE']:
-			Visualize.plot_class_relationships(config=config, method=method, data_mode=data_mode, feature_maps=feature_maps, labels=labels[list_not_null_nodes])
-
-
-	@staticmethod
-	def plot_roc_curves_objective_function(input):
-
-		thresh_technique = input[0]
-		approach         = input[1]
-		dataset_name     = input[2]
-
-		aim1_1 = AIM1_1_TorchXrayVision.run_full_experiment(approach=approach, dataset_name=dataset_name)
-		Visualize.plot_roc_curves(config=aim1_1.config , data=aim1_1.test , thresh_technique=thresh_technique)
-
-
-	@classmethod
-	def loop(cls, experiment='roc_curve', data_mode=DataModes.TEST):
-
-		import itertools
-		multiprocessing.set_start_method('spawn', force=True)
-		from tqdm.notebook import tqdm
-
-		if experiment == 'roc_curve':
-			inputs_list = list( itertools.product(ThreshTechList, ['loss', 'logit'], DatasetList.members()) )
-			with multiprocessing.Pool(processes=len(inputs_list)) as pool:
-				pool.map(cls.plot_roc_curves_objective_function, inputs_list)
-
-		elif experiment == 'class_relationship':
-			for dataset_name in tqdm(DatasetList.members()):
-				# Also plot the merged datasets figure
-				cls.plot_class_relationships_objective_function(dataset_name=dataset_name, data_mode=data_mode)
-
-	def plot_metrics_all_thresh_techniques(self, save_figure=False):
-
-		import matplotlib.pyplot as plt
-		import seaborn as sns
-
-		def save_plot():
-			save_path = self.config.local_path.joinpath(f'final/metrics_all_datasets/fig_metrics_AUC_ACC_F1_all_thresh_techniques/')
-			save_path.mkdir(parents=True, exist_ok=True)
-			for format in ['png', 'eps', 'svg', 'pdf']:
-				plt.savefig(save_path.joinpath(f'metrics_AUC_ACC_F1.{format}'), format=format, dpi=300)
-
-		def get_metrics():
-			columns = pd.MultiIndex.from_product( [['ACC', 'AUC', 'F1'], ['baseline', 'loss', 'logit']])
-			metric_df = {}
-			for thresh_technique in ['DEFAULT', 'ROC', 'PRECISION_RECALL']:
-				output = AIM1_1_TorchXrayVision.get_all_metrics(datasets_list=['CheX', 'NIH', 'PC'], data_mode=DataModes.TEST, thresh_technique=thresh_technique)
-				metric_df[thresh_technique] = pd.DataFrame(columns=columns)
-				for metric in ['ACC', 'AUC', 'F1']:
-					df = pd.DataFrame(dict( baseline=output.loss.baseline.auc_acc_f1.T[metric], loss=output.loss.proposed.auc_acc_f1.T[metric], logit=output.logit.proposed.auc_acc_f1.T[metric]))
-					metric_df[thresh_technique][metric] = df.T[output.list_nodes_impacted].T
-
-			return metric_df
-
-		def plot():
-			metric_df = get_metrics()
-			fig, axes = plt.subplots(3, 3, figsize=(21, 21), sharey=True, sharex=True)
-			sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True, rc=None)
-
-			params = dict(legend=False, fontsize=16, kind='barh')
-			for i, thresh_technique in enumerate(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
-				metric_df[thresh_technique]['ACC'].plot(ax=axes[i,0], xlabel='ACC', ylabel=thresh_technique, **params)
-				metric_df[thresh_technique]['AUC'].plot(ax=axes[i,1], xlabel='AUC', ylabel=thresh_technique, **params)
-				metric_df[thresh_technique]['F1' ].plot(ax=axes[i,2], xlabel='F1' , ylabel=thresh_technique, **params)
-
-			plt.legend(loc='lower right', fontsize=16)
-			plt.tight_layout()
-
-		plot()
-		if save_figure: save_plot()
-
-# endregion
+if __name__ == '__main__':
+	pass

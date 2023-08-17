@@ -137,7 +137,7 @@ def densenet121(cfg, **kwargs):
     model = DenseNet(num_init_features=64, growth_rate=32, block_config=(6, 12, 24, 16),  # noqa
                      norm_type=cfg.norm_type, **kwargs)
     if cfg.pretrained:
-        # '.'s are no longer allowed in module names, but pervious _DenseLayer
+        # '.'s are no longer allowed in module members, but pervious _DenseLayer
         # has keys 'norm.1', 'relu.1', 'conv.1', 'norm.2', 'relu.2', 'conv.2'.
         # They are also in the checkpoints in model_urls. This pattern is used
         # to find such keys.
@@ -164,7 +164,7 @@ def densenet169(cfg, **kwargs):
     model = DenseNet(num_init_features=64, growth_rate=32, block_config=(6, 12, 32, 32),  # noqa
                      norm_type=cfg.norm_type, **kwargs)
     if cfg.pretrained:
-        # '.'s are no longer allowed in module names, but pervious _DenseLayer
+        # '.'s are no longer allowed in module members, but pervious _DenseLayer
         # has keys 'norm.1', 'relu.1', 'conv.1', 'norm.2', 'relu.2', 'conv.2'.
         # They are also in the checkpoints in model_urls. This pattern is used
         # to find such keys.
@@ -191,7 +191,7 @@ def densenet201(cfg, **kwargs):
     model = DenseNet(num_init_features=64, growth_rate=32, block_config=(6, 12, 48, 32),  # noqa
                      norm_type=cfg.norm_type, **kwargs)
     if cfg.pretrained:
-        # '.'s are no longer allowed in module names, but pervious _DenseLayer
+        # '.'s are no longer allowed in module members, but pervious _DenseLayer
         # has keys 'norm.1', 'relu.1', 'conv.1', 'norm.2', 'relu.2', 'conv.2'.
         # They are also in the checkpoints in model_urls. This pattern is used
         # to find such keys.
@@ -218,7 +218,7 @@ def densenet161(cfg, **kwargs):
     model = DenseNet(num_init_features=96, growth_rate=48, block_config=(6, 12, 36, 24),  # noqa
                      norm_type=cfg.norm_type, **kwargs)
     if cfg.pretrained:
-        # '.'s are no longer allowed in module names, but pervious _DenseLayer
+        # '.'s are no longer allowed in module members, but pervious _DenseLayer
         # has keys 'norm.1', 'relu.1', 'conv.1', 'norm.2', 'relu.2', 'conv.2'.
         # They are also in the checkpoints in model_urls. This pattern is used
         # to find such keys.

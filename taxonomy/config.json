@@ -1,7 +1,7 @@
 {
   "dataset_path"     : "./datasets",
-  "dataset_name"     : "CheX"                         ,
-  "dataset_data_mode" : "train"                      ,
+  "dataset_name"     : "CHEXPERT"                         ,
+  "dataset_data_mode" : "TRAIN"                      ,
   "views"            : ["AP", "PA"]                        ,
   "max_samples"      : 1000                          ,
   "NotNull_Samples"  : true                          ,
@@ -10,7 +10,7 @@
   "num_workers" : 1    ,
   "shuffle"     : false,
 
-  "model_name"   : "ALL_224"       ,
+  "modelName"   : "ALL_224"       ,
   "architecture" : "DenseNet121",
   "path_baseline_CheX_weights": "./pre_trained_models/chestxray/chexpert_baseline_model_weight.zip",
   "batch_size"     : 1000    ,
@@ -40,17 +40,6 @@
   "b"                         : 1.0 ,
   "parallelization_technique" : 0 ,
 
-
   "local_path"             : "./main/aims/aim1_1_taxonomy/outputs",
-  "artifact_path"          : "",
-  "RUN_MLFlow"             : false ,
-  "KILL_MLFlow_at_END"     : false ,
-  "SSH_USER"               : "artinmajdi" ,
-  "SSH_HOST"               : "data7-db1.cyverse.org",
-  "SSH_PORT"               : "5432" ,
-  "DATABASE"               : "chest_db_v2" ,
-  "DATABASE_USER_PASSWORD" : "1234" ,
-  "experiment_name"        : "label_inter_dependence",
-  "MLFlow_run_name"        : "",
-  "approach"               : "loss"
+  "methodName"             : "LOSS"
 }

@@ -522,7 +522,7 @@ class pyramidPooling(nn.Module):
         self,
         in_channels,
         pool_sizes,
-        model_name="pspnet",
+        modelName="pspnet",
         fusion_mode="cat",
         with_bn=True,
     ):
@@ -548,13 +548,13 @@ class pyramidPooling(nn.Module):
 
         self.path_module_list = nn.ModuleList(self.paths)
         self.pool_sizes = pool_sizes
-        self.model_name = model_name
+        self.modelName = modelName
         self.fusion_mode = fusion_mode
 
     def forward(self, x):
         h, w = x.shape[2:]
 
-        if self.training or self.model_name != "icnet":  # general settings or pspnet
+        if self.training or self.modelName != "icnet":  # general settings or pspnet
             k_sizes = []
             strides = []
             for pool_size in self.pool_sizes:
@@ -572,7 +572,7 @@ class pyramidPooling(nn.Module):
             ):
                 out = F.avg_pool2d(x, k_sizes[i], stride=strides[i], padding=0)
                 # out = F.adaptive_avg_pool2d(x, output_size=(pool_size, pool_size))
-                if self.model_name != "icnet":
+                if self.modelName != "icnet":
                     out = module(out)
                 out = F.upsample(out, size=(h, w), mode="bilinear")
                 output_slices.append(out)
@@ -586,7 +586,7 @@ class pyramidPooling(nn.Module):
             ):
                 out = F.avg_pool2d(x, k_sizes[i], stride=strides[i], padding=0)
                 # out = F.adaptive_avg_pool2d(x, output_size=(pool_size, pool_size))
-                if self.model_name != "icnet":
+                if self.modelName != "icnet":
                     out = module(out)
                 out = F.upsample(out, size=(h, w), mode="bilinear")
                 pp_sum = pp_sum + out

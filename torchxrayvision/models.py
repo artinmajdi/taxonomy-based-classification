@@ -21,7 +21,7 @@ model_urls['all'] = {
     "description": 'This model was trained on the datasets: nih-pc-chex-mimic_ch-google-openi-rsna and is described here: https://arxiv.org/abs/2002.02497',
     "weights_url": 'https://github.com/mlmed/torchxrayvision/releases/download/v1/nih-pc-chex-mimic_ch-google-openi-kaggle-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt',
     "labels": ['Atelectasis', 'Consolidation', 'Infiltration', 'Pneumothorax', 'Edema', 'Emphysema', 'Fibrosis', 'Effusion', 'Pneumonia', 'Pleural_Thickening', 'Cardiomegaly', 'Nodule', 'Mass', 'Hernia', 'Lung Lesion', 'Fracture', 'Lung Opacity', 'Enlarged Cardiomediastinum'],
-    "op_threshs": [0.07422872, 0.038290843, 0.09814756, 0.0098118475, 0.023601074, 0.0022490358, 0.010060724, 0.103246614, 0.056810737, 0.026791653, 0.050318155, 0.023985857, 0.01939503, 0.042889766, 0.053369623, 0.035975814, 0.20204692, 0.05015312],
+    "op_threshes": [0.07422872, 0.038290843, 0.09814756, 0.0098118475, 0.023601074, 0.0022490358, 0.010060724, 0.103246614, 0.056810737, 0.026791653, 0.050318155, 0.023985857, 0.01939503, 0.042889766, 0.053369623, 0.035975814, 0.20204692, 0.05015312],
     "ppv80_thres": [0.72715247, 0.8885005, 0.92493945, 0.6527224, 0.68707734, 0.46127197, 0.7272054, 0.6127343, 0.9878492, 0.61979693, 0.66309816, 0.7853459, 0.930661, 0.93645346, 0.6788558, 0.6547198, 0.61614525, 0.8489876]
 }
 model_urls['densenet121-res224-all'] = model_urls['all']
@@ -30,7 +30,7 @@ model_urls['densenet121-res224-all'] = model_urls['all']
 model_urls['nih'] = {
     "weights_url": 'https://github.com/mlmed/torchxrayvision/releases/download/v1/nih-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt',
     "labels": ['Atelectasis', 'Consolidation', 'Infiltration', 'Pneumothorax', 'Edema', 'Emphysema', 'Fibrosis', 'Effusion', 'Pneumonia', 'Pleural_Thickening', 'Cardiomegaly', 'Nodule', 'Mass', 'Hernia', '', '', '', ''],
-    "op_threshs": [0.039117552, 0.0034529066, 0.11396341, 0.0057298196, 0.00045666535, 0.0018880932, 0.012037827, 0.038744126, 0.0037213727, 0.014730946, 0.016149804, 0.054241467, 0.037198864, 0.0004403434, np.nan, np.nan, np.nan, np.nan],
+    "op_threshes": [0.039117552, 0.0034529066, 0.11396341, 0.0057298196, 0.00045666535, 0.0018880932, 0.012037827, 0.038744126, 0.0037213727, 0.014730946, 0.016149804, 0.054241467, 0.037198864, 0.0004403434, np.nan, np.nan, np.nan, np.nan],
 }
 model_urls['densenet121-res224-nih'] = model_urls['nih']
 
@@ -38,14 +38,14 @@ model_urls['densenet121-res224-nih'] = model_urls['nih']
 model_urls['pc'] = {
     "weights_url": 'https://github.com/mlmed/torchxrayvision/releases/download/v1/pc-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt',
     "labels": ['Atelectasis', 'Consolidation', 'Infiltration', 'Pneumothorax', 'Edema', 'Emphysema', 'Fibrosis', 'Effusion', 'Pneumonia', 'Pleural_Thickening', 'Cardiomegaly', 'Nodule', 'Mass', 'Hernia', '', 'Fracture', '', ''],
-    "op_threshs": [0.031012505, 0.013347598, 0.081435576, 0.001262615, 0.002587246, 0.0035944257, 0.0023071, 0.055412333, 0.044385884, 0.042766232, 0.043258056, 0.037629247, 0.005658899, 0.0091741895, np.nan, 0.026507627, np.nan, np.nan]
+    "op_threshes": [0.031012505, 0.013347598, 0.081435576, 0.001262615, 0.002587246, 0.0035944257, 0.0023071, 0.055412333, 0.044385884, 0.042766232, 0.043258056, 0.037629247, 0.005658899, 0.0091741895, np.nan, 0.026507627, np.nan, np.nan]
 }
 model_urls['densenet121-res224-pc'] = model_urls['pc']
 
 model_urls['chex'] = {
     "weights_url": 'https://github.com/mlmed/torchxrayvision/releases/download/v1/chex-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt',
     "labels": ['Atelectasis', 'Consolidation', '', 'Pneumothorax', 'Edema', '', '', 'Effusion', 'Pneumonia', '', 'Cardiomegaly', '', '', '', 'Lung Lesion', 'Fracture', 'Lung Opacity', 'Enlarged Cardiomediastinum'],
-    "op_threshs": [0.1988969, 0.05710573, np.nan, 0.0531293, 0.1435217, np.nan, np.nan, 0.27212676, 0.07749717, np.nan, 0.19712369, np.nan, np.nan, np.nan, 0.09932402, 0.09273402, 0.3270967, 0.10888247],
+    "op_threshes": [0.1988969, 0.05710573, np.nan, 0.0531293, 0.1435217, np.nan, np.nan, 0.27212676, 0.07749717, np.nan, 0.19712369, np.nan, np.nan, np.nan, 0.09932402, 0.09273402, 0.3270967, 0.10888247],
 }
 model_urls['densenet121-res224-chex'] = model_urls['chex']
 
@@ -53,21 +53,21 @@ model_urls['densenet121-res224-chex'] = model_urls['chex']
 model_urls['rsna'] = {
     "weights_url": 'https://github.com/mlmed/torchxrayvision/releases/download/v1/kaggle-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt',
     "labels": ['', '', '', '', '', '', '', '', 'Pneumonia', '', '', '', '', '', '', '', 'Lung Opacity', ''],
-    "op_threshs": [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 0.13486601, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 0.13511065, np.nan]
+    "op_threshes": [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 0.13486601, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 0.13511065, np.nan]
 }
 model_urls['densenet121-res224-rsna'] = model_urls['rsna']
 
 model_urls['mimic_nb'] = {
     "weights_url": 'https://github.com/mlmed/torchxrayvision/releases/download/v1/mimic_nb-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt',
     "labels": ['Atelectasis', 'Consolidation', '', 'Pneumothorax', 'Edema', '', '', 'Effusion', 'Pneumonia', '', 'Cardiomegaly', '', '', '', 'Lung Lesion', 'Fracture', 'Lung Opacity', 'Enlarged Cardiomediastinum'],
-    "op_threshs": [0.08558747, 0.011884617, np.nan, 0.0040595434, 0.010733786, np.nan, np.nan, 0.118761964, 0.022924708, np.nan, 0.06358637, np.nan, np.nan, np.nan, 0.022143636, 0.017476924, 0.1258702, 0.014020768],
+    "op_threshes": [0.08558747, 0.011884617, np.nan, 0.0040595434, 0.010733786, np.nan, np.nan, 0.118761964, 0.022924708, np.nan, 0.06358637, np.nan, np.nan, np.nan, 0.022143636, 0.017476924, 0.1258702, 0.014020768],
 }
 model_urls['densenet121-res224-mimic_nb'] = model_urls['mimic_nb']
 
 model_urls['mimic_ch'] = {
     "weights_url": 'https://github.com/mlmed/torchxrayvision/releases/download/v1/mimic_ch-densenet121-d121-tw-lr001-rot45-tr15-sc15-seed0-best.pt',
     "labels": ['Atelectasis', 'Consolidation', '', 'Pneumothorax', 'Edema', '', '', 'Effusion', 'Pneumonia', '', 'Cardiomegaly', '', '', '', 'Lung Lesion', 'Fracture', 'Lung Opacity', 'Enlarged Cardiomediastinum'],
-    "op_threshs": [0.09121389, 0.010573786, np.nan, 0.005023008, 0.003698257, np.nan, np.nan, 0.08001232, 0.037242252, np.nan, 0.05006329, np.nan, np.nan, np.nan, 0.019866971, 0.03823637, 0.11303808, 0.0069147074],
+    "op_threshes": [0.09121389, 0.010573786, np.nan, 0.005023008, 0.003698257, np.nan, np.nan, 0.08001232, 0.037242252, np.nan, 0.05006329, np.nan, np.nan, np.nan, 0.019866971, 0.03823637, 0.11303808, 0.0069147074],
 }
 model_urls['densenet121-res224-mimic_ch'] = model_urls['mimic_ch']
 
@@ -75,7 +75,7 @@ model_urls['resnet50-res512-all'] = {
     "description": 'This model was trained on the datasets pc-nih-rsna-siim-vin at a 512x512 resolution.',
     "weights_url": 'https://github.com/mlmed/torchxrayvision/releases/download/v1/pc-nih-rsna-siim-vin-resnet50-test512-e400-state.pt',
     "labels": ['Atelectasis', 'Consolidation', 'Infiltration', 'Pneumothorax', 'Edema', 'Emphysema', 'Fibrosis', 'Effusion', 'Pneumonia', 'Pleural_Thickening', 'Cardiomegaly', 'Nodule', 'Mass', 'Hernia', 'Lung Lesion', 'Fracture', 'Lung Opacity', 'Enlarged Cardiomediastinum'],
-    "op_threshs": [0.51570356, 0.50444704, 0.53787947, 0.50723547, 0.5025118, 0.5035252, 0.5038076, 0.51862943, 0.5078151, 0.50724894, 0.5056339, 0.510706, 0.5053923, 0.5020846, np.nan, 0.5080557, 0.5138526, np.nan],
+    "op_threshes": [0.51570356, 0.50444704, 0.53787947, 0.50723547, 0.5025118, 0.5035252, 0.5038076, 0.51862943, 0.5078151, 0.50724894, 0.5056339, 0.510706, 0.5053923, 0.5020846, np.nan, 0.5080557, 0.5138526, np.nan],
     "ppv80_thres": [0.690908, 0.720028, 0.7303882, 0.7235838, 0.6787441, 0.7304924, 0.73105824, 0.6839408, 0.7241559, 0.7219969, 0.6346738, 0.72764945, 0.7285066, 0.5735704, np.nan, 0.69684714, 0.7135549, np.nan]
 }
 
@@ -100,7 +100,7 @@ class Model:
     """Each classifier provides a field `model.targets` which aligns to
     the list of predictions that the model makes. Depending on the
     weights loaded this list will change. The predictions can be aligned
-    to pathology names as follows:
+    to pathology members as follows:
     """
 
     def features(self, x: torch.Tensor) -> torch.Tensor:
@@ -285,7 +285,7 @@ class DenseNet(nn.Module):
                 nn.init.constant_(m.bias, 0)
 
         # needs to be register_buffer here so it will go to cuda/cpu easily
-        self.register_buffer('op_threshs', op_threshs)
+        self.register_buffer('op_threshes', op_threshs)
 
         if self.weights != None:
             self.weights_filename_local = get_weights(weights)
@@ -304,8 +304,8 @@ class DenseNet(nn.Module):
 
             self.eval()
 
-            if "op_threshs" in model_urls[weights]:
-                self.op_threshs = torch.tensor(model_urls[weights]["op_threshs"])
+            if "op_threshes" in model_urls[weights]:
+                self.op_threshes = torch.tensor(model_urls[weights]["op_threshes"])
 
             self.upsample = nn.Upsample(size=(224, 224), mode='bilinear', align_corners=False)
 
@@ -333,9 +333,9 @@ class DenseNet(nn.Module):
         if hasattr(self, 'apply_sigmoid') and self.apply_sigmoid:
             out = torch.sigmoid(out)
 
-        if hasattr(self, "op_threshs") and (self.op_threshs != None):
+        if hasattr(self, "op_threshes") and (self.op_threshes != None):
             out = torch.sigmoid(out)
-            out = op_norm(out, self.op_threshs)
+            out = op_norm(out, self.op_threshes)
         return out
 
 
@@ -352,7 +352,7 @@ class ResNet(nn.Module):
         model = xrv.models.ResNet(weights="resnet50-res512-all")
 
     :param weights: Specify a weight name to load pre-trained weights
-    :param op_threshs: Specify a weight name to load pre-trained weights 
+    :param op_threshes: Specify a weight name to load pre-trained weights
     :param apply_sigmoid: Apply a sigmoid 
 
     """
@@ -411,8 +411,8 @@ class ResNet(nn.Module):
             print("Loading failure. Check weights file:", self.weights_filename_local)
             raise e
 
-        if "op_threshs" in model_urls[weights]:
-            self.register_buffer('op_threshs', torch.tensor(model_urls[weights]["op_threshs"]))
+        if "op_threshes" in model_urls[weights]:
+            self.register_buffer('op_threshes', torch.tensor(model_urls[weights]["op_threshes"]))
 
         self.upsample = nn.Upsample(size=(512, 512), mode='bilinear', align_corners=False)
 
@@ -451,7 +451,7 @@ class ResNet(nn.Module):
         if hasattr(self, 'apply_sigmoid') and self.apply_sigmoid:
             out = torch.sigmoid(out)
 
-        if hasattr(self, "op_threshs") and (self.op_threshs != None):
+        if hasattr(self, "op_threshes") and (self.op_threshs != None):
             out = torch.sigmoid(out)
             out = op_norm(out, self.op_threshs)
         return out
@@ -499,7 +499,7 @@ def op_norm(outputs, op_threshs):
     """Normalize outputs according to operating points for a given model.
     Args: 
         outputs: outputs of self.classifier(). torch.Size(batch_size, num_tasks) 
-        op_threshs_arr: torch.Size(batch_size, num_tasks) with self.op_threshs expanded.
+        op_threshs_arr: torch.Size(batch_size, num_tasks) with self.op_threshes expanded.
     Returns:
         outputs_new: normalized outputs, torch.Size(batch_size, num_tasks)
     """

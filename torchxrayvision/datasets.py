@@ -874,7 +874,7 @@ class PC_Dataset(Dataset):
         self.check_paths_exist()
         self.csv = pd.read_csv(self.csvpath, low_memory=False)
 
-        # Standardize view names
+        # Standardize view members
         self.csv.loc[self.csv["Projection"].isin(["AP_horizontal"]), "Projection"] = "AP Supine"
 
         self.csv["view"] = self.csv['Projection']
