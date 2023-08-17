@@ -19,7 +19,7 @@ class Tables:
 		save_path = self.config.local_path.joinpath(
 			f'tables/metrics_per_dataset/{thresh_technique}/metrics_{data_mode}.xlsx')
 		
-		def save(metrics):
+		def save(metricsa):
 			
 			save_path.parent.mkdir(parents=True, exist_ok=True)
 			
@@ -27,7 +27,7 @@ class Tables:
 			with pd.ExcelWriter(save_path, engine='openpyxl') as writer:
 				# Write each metric to a different worksheet
 				for m in EvaluationMetricNames:
-					getattr(metrics, m.value).to_excel(writer, sheet_name=m.name)
+					getattr(metricsa, m.value).to_excel(writer, sheet_name=m.name)
 		
 		def get():
 			columns = pd.MultiIndex.from_product([DatasetNames.members(), MethodNames.members()], names=['dataset', 'methodName'])

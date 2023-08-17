@@ -8,15 +8,8 @@ scikit-learn
 tqdm
 pandas
 Pillow
-setuptools
-requests
-imageio
 networkx
-researchpy
 hyperopt
 seaborn
 scipy
-wget
 umap
-colorama
-markdown
