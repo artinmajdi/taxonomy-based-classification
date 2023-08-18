@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import argparse
 import enum
 from dataclasses import dataclass
 from typing import Union, Dict
 
 import pandas as pd
+
+from taxonomy.utilities.data import Data
 
 
 def members(cls):
@@ -50,9 +53,9 @@ class DataModes(enum.Enum):
 	
 @members
 class MethodNames(enum.Enum):
-	BASELINE    = 'baseline'
-	LOGIT_BASED = 'logit'
-	LOSS_BASED  = 'loss'
+	BASELINE = 'baseline'
+	LOGIT    = 'logit_based'
+	LOSS     = 'loss_based'
 
 
 @members
@@ -78,10 +81,10 @@ class EvaluationMetricNames(enum.Enum):
 
 @members
 class ModelFindingNames(enum.Enum):
-	TRUTH = 'truth'
-	LOSS  = 'loss'
-	LOGIT = 'logit'
-	PRED  = 'pred'
+	GROUND_TRUTH = 'truth'
+	LOSS_VALUES  = 'loss'
+	LOGIT_VALUES = 'logit'
+	PRED_PROBS   = 'pred'
 	
 	
 @dataclass
@@ -89,8 +92,9 @@ class NodeData:
 	hierarchy_penalty: pd.DataFrame
 	metrics          : Union[Dict, pd.DataFrame]
 	data             : Union[pd.DataFrame, Dict[str, pd.DataFrame]]
-	
-	
+
+
+
 if __name__ == '__main__':
 	print(ExperimentStageNames.members())
 

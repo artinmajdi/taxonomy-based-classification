@@ -882,41 +882,18 @@ def deserialize_object(state, cls):
 	return obj
 
 
-@dataclass(init=False)
-class DataMerged:
-	def __init__(self, data):
-		self.pred  = pd.concat(data['pred'],axis=0).reset_index(drop=True)
-		self.truth = pd.concat(data['truth'],axis=0).reset_index(drop=True)
-		self.yhat  = pd.concat(data['yhat'], axis=0).reset_index(drop=True).astype(int)
-		self.list_nodes_impacted = [n for n in self.pred.columns if n in set().union(*data['list_nodes_impacted'])]
-		self.auc_acc_f1 		 = pd.DataFrame(columns=self.pred.columns, index=EvaluationMetricNames.members())
-
-
-@dataclass
-class Metrics:
-	metrics_comparison:  pd.DataFrame
-	config  : argparse.Namespace
-	methodName: str
-	baseline: DataMerged
-	proposed: DataMerged
-
-	@property
-	def metrics(self):
-		return self.metrics_comparison[self.baseline.list_nodes_impacted].T
-
 
 @dataclass
 class MetricsAllTechniques:
-	loss: Metrics
-	logit: Metrics
-	auc_acc_f1: pd.DataFrame
+	loss            : Metrics
+	logit           : Metrics
+	auc_acc_f1      : pd.DataFrame
 	thresh_technique: str
-	datasets_list: List[str]
-	data_mode: str
+	datasets_list   : List[str]
+	data_mode       : str
 
-	@property
-	def metrics(self):
-		return self.auc_acc_f1.T[self.list_nodes_impacted].T.astype(float).round(3)
+	def __post_init__(self):
+		self.metrics = self.auc_acc_f1.T[self.list_nodes_impacted].T.astype(float).round(3)
 
 	@property
 	def config(self):
@@ -926,65 +903,12 @@ class MetricsAllTechniques:
 	def list_nodes_impacted(self):
 		return self.logit.baseline.list_nodes_impacted
 
-	def plot_metrics(self, save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
+
+	@staticmethod
+	def plot_roc_curves(logit: Metrics, thresh_technique: ThreshTechList, config: argparse.Namespace, list_nodes_impacted: list, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
 
 		def save_plot():
-			save_path = self.config.local_path.joinpath(f'figures/auc_acc_f1_all_datasets/{self.thresh_technique}/')
-			save_path.mkdir(parents=True, exist_ok=True)
-			for format in ['png', 'eps', 'svg', 'pdf']:
-				plt.savefig(save_path.joinpath( f'metrics_AUC_ACC_F1.{format}'), format=format, dpi=300)
-
-		def barplot():
-			fig, axes = plt.subplots(1, 3, figsize=(21, 7), sharey=True)  # type: ignore
-			sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True, rc=None)
-
-			params = dict(legend=False, fontsize=16, kind='barh')
-
-			self.metrics[EvaluationMetricNames.ACC.name].plot(ax=axes[0], title=EvaluationMetricNames.ACC.name, **params)
-			self.metrics[EvaluationMetricNames.AUC.name].plot(ax=axes[1], title=EvaluationMetricNames.AUC.name, **params)
-			self.metrics[EvaluationMetricNames.F1.name].plot(ax=axes[2], title=EvaluationMetricNames.F1.name, **params)
-			plt.legend(loc='upper right', fontsize=16)
-			plt.tight_layout()
-
-
-		def heatmap():
-			import seaborn as sns
-			import matplotlib.pyplot as plt
-
-			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
-
-			fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=True)  # type: ignore
-			params = dict(annot=True, fmt=".3f", linewidths=.5, cmap='YlGnBu', cbar=False, annot_kws={"size": fontsize})
-
-			for i, m in enumerate(EvaluationMetricNames.members()):
-
-				sns.heatmap(data=self.metrics[m],ax=axes[i], **params)
-				axes[i].set_title(m, fontsize=int(1.5*fontsize), fontweight='bold')
-				axes[i].tick_params(axis='both', which='major', labelsize=fontsize)
-
-				# sns.heatmap(data=self.metrics[EvaluationMetricNames.ACC.name],ax=axes[0], **params)
-				# axes[0].set_title(EvaluationMetricNames.ACC.name, fontsize=int(1.5*fontsize), fontweight='bold')
-				# axes[0].tick_params(axis='both', which='major', labelsize=fontsize)
-
-				# sns.heatmap(data=self.metrics[EvaluationMetricNames.AUC.name], ax=axes[1], **params)
-				# axes[1].set_title(EvaluationMetricNames.AUC.name, fontsize=int(1.5*fontsize), fontweight='bold')
-				# axes[1].tick_params(axis='both', which='major', labelsize=fontsize)
-
-				# sns.heatmap(data=self.metrics[EvaluationMetricNames.F1.name] , ax=axes[2], **params)
-				# axes[2].set_title(EvaluationMetricNames.F1.name, fontsize=int(1.5*fontsize), fontweight='bold')
-				# axes[2].tick_params(axis='both', which='major', labelsize=fontsize)
-
-			plt.tight_layout()
-
-		heatmap()
-
-		if save_figure:
-			save_plot()
-
-	def plot_roc_curves(self, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
-
-		def save_plot():
-			save_path = self.config.local_path.joinpath( f'figures/roc_curve_all_datasets/{self.thresh_technique}/')
+			save_path = config.local_path.joinpath( f'figures/roc_curve_all_datasets/{thresh_technique}/')
 			save_path.mkdir(parents=True, exist_ok=True)
 			for ft in ['png', 'eps', 'svg', 'pdf']:
 				plt.savefig(save_path.joinpath(
@@ -997,19 +921,16 @@ class MetricsAllTechniques:
 			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
 
 			# Set up the grid
-			n_nodes, n_cols = len(self.list_nodes_impacted), 3
+			n_nodes, n_cols = len(list_nodes_impacted), 3
 			n_rows = int(np.ceil(n_nodes / n_cols))
 
 			# Set up the figure and axis
 			fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharey=True, sharex=True)  # type: ignore
 			axes     = axes.flatten()
 
-
-			# sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True, rc=None)
-
 			return fig, axes, n_rows, n_cols
 
-		list_parent_nodes = set(Hierarchy.taxonomy_structure.keys()).intersection( set(self.logit.proposed.pred.columns))
+		list_parent_nodes = set(Hierarchy.taxonomy_structure.keys()).intersection( set(logit.proposed.pred.columns))
 
 		fig, axes, n_rows, n_cols = setup_plot()
 
@@ -1039,8 +960,8 @@ class MetricsAllTechniques:
 			# Plot the ROC curve
 			lines, labels = [], []
 
-			truth = self.logit.proposed.truth
-			for methodName in EvaluationMetricNames.members():
+			truth = logit.proposed.truth
+			for methodName in MethodNames.members():
 
 				data = getattr(self, methodName.lower())
 				technique = MethodNames[methodName]
@@ -1075,7 +996,7 @@ class MetricsAllTechniques:
 			plt.tight_layout()
 
 		# Loop through each disease and plot the ROC curve
-		for idx, node in enumerate(self.list_nodes_impacted):
+		for idx, node in enumerate(list_nodes_impacted):
 			plot_per_node(node, idx)
 
 		# Postprocess the plot

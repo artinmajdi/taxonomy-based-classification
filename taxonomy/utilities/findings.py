@@ -1,10 +1,11 @@
+import argparse
 import pathlib
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
-from taxonomy.utilities.params import DataModes, MethodNames, DatasetNames, EvaluationMetricNames
+from taxonomy.utilities.params import DataModes, MethodNames, DatasetNames, EvaluationMetricNames, ThreshTechList
 from taxonomy.utilities.utils import reading_user_input_arguments, TaxonomyXRV, LoadSaveFindings
 
 
@@ -236,3 +237,47 @@ class Visualize:
 		
 		plot()
 		if save_figure: save_plot()
+
+
+	@staticmethod
+	def plot_metrics(config: argparse.Namespace, metrics: pd.DataFrame, thresh_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
+
+		def save_plot():
+			save_path = self.config.local_path.joinpath(f'figures/auc_acc_f1_all_datasets/{thresh_technique}/')
+			save_path.mkdir(parents=True, exist_ok=True)
+			for ft in ['png', 'eps', 'svg', 'pdf']:
+				plt.savefig( save_path.joinpath( f'metrics_AUC_ACC_F1.{ft}' ), format=ft, dpi=300 )
+
+		def barplot():
+			fig, axes = plt.subplots(1, 3, figsize=(21, 7), sharey=True)  # type: ignore
+			sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True, rc=None)
+
+			params = dict(legend=False, fontsize=16, kind='barh')
+
+			metrics[EvaluationMetricNames.ACC.name].plot(ax = axes[0], title = EvaluationMetricNames.ACC.name, **params)
+			metrics[EvaluationMetricNames.AUC.name].plot(ax = axes[1], title = EvaluationMetricNames.AUC.name, **params)
+			metrics[EvaluationMetricNames.F1.name].plot(ax  = axes[2], title = EvaluationMetricNames.F1.name , **params)
+			plt.legend(loc='upper right', fontsize=16)
+			plt.tight_layout()
+
+
+		def heatmap():
+			import seaborn as sns
+			import matplotlib.pyplot as plt
+
+			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
+
+			fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=True)  # type: ignore
+			params = dict(annot=True, fmt=".3f", linewidths=.5, cmap='YlGnBu', cbar=False, annot_kws={"size": fontsize})
+
+			for i, m in enumerate(EvaluationMetricNames.members()):
+				sns.heatmap(data=metrics[m],ax=axes[i], **params)
+				axes[i].set_title(m, fontsize=int(1.5*fontsize), fontweight='bold')
+				axes[i].tick_params(axis='both', which='major', labelsize=fontsize)
+
+			plt.tight_layout()
+
+		heatmap()
+
+		if save_figure:
+			save_plot()

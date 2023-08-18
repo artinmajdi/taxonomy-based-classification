@@ -59,12 +59,12 @@ class Labels:
 		
 		@dataclass
 		class Nodes:
-			unique: List[str] = field(default_factory=list)
-			parents: List[str] = field(default_factory=list)
-			exist_in_taxonomy: List[str] = field(default_factory=list)
-			not_null: List[str] = field(default_factory=list)
-			impacted: List[str] = field(default_factory=list)
-			node_thresh_tuple: List[str] = field(default_factory=list)
+			unique           : List[str] = field(default_factory = list)
+			parents          : List[str] = field(default_factory = list)
+			not_null         : List[str] = field(default_factory = list)
+			impacted         : List[str] = field(default_factory = list)
+			exist_in_taxonomy: List[str] = field(default_factory = list)
+			node_thresh_tuple: List[str] = field(default_factory = list)
 		
 		nodes = Nodes()
 		nodes.unique = self.totals.index.to_list()
@@ -74,12 +74,43 @@ class Labels:
 			nodes.exist_in_taxonomy = Hierarchy_cls.list_nodes_exist_in_taxonomy
 		
 		if self.labels.size > 0:
-			nodes.not_null = self.labels.columns[self.labels.count() > 0].to_list()
-			nodes.impacted = [x for x in nodes.not_null if x in nodes.exist_in_taxonomy]
+			nodes.not_null          = self.labels.columns[self.labels.count() > 0].to_list()
+			nodes.impacted          = [x for x in nodes.not_null if x in nodes.exist_in_taxonomy]
 			nodes.node_thresh_tuple = list(itertools.product(nodes.impacted, ThreshTechList))
 		
 		return nodes
 
+
+@dataclass(init=False)
+class DataMerged:
+	def __init__(self, data):
+		self.pred       = self.concat_data(data['pred'])
+		self.truth      = self.concat_data(data['truth'])
+		self.yhat       = self.concat_data(data['yhat']  , int)
+		self.auc_acc_f1 = pd.DataFrame(columns=self.pred.columns, index=EvaluationMetricNames.members())
+		self.list_nodes_impacted = [n for n in self.pred.columns if n in set().union(*data['list_nodes_impacted'])]
+
+	@staticmethod
+	def concat_data(data, dtype=None):
+		df = pd.concat(data, axis=0).reset_index(drop=True)
+		return df.astype(dtype) if dtype else df
+
+@dataclass
+class Metrics:
+	metrics_comparison: pd.DataFrame
+	config            : argparse.Namespace
+	baseline          : DataMerged
+	proposed          : DataMerged
+
+	def __post_init__(self):
+		self.metrics = self.metrics_comparison[self.baseline.list_nodes_impacted].T
+
+
+@dataclass
+class MethodFindings:
+	logit_techniques: Metrics
+	loss_technique : Metrics
+	data: Data
 
 class Findings:
 	list_metrics = EvaluationMetricNames.members() + ['Threshold']
