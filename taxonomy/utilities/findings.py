@@ -30,10 +30,11 @@ class Tables:
 					getattr(metricsa, m.value).to_excel(writer, sheet_name=m.name)
 		
 		def get():
-			columns = pd.MultiIndex.from_product([DatasetNames.members(), MethodNames.members()], names=['dataset', 'methodName'])
-			auc = pd.DataFrame(columns = columns)
-			f1  = pd.DataFrame(columns = columns)
-			acc = pd.DataFrame(columns = columns)
+			columns = pd.MultiIndex.from_product([DatasetNames.members(), MethodNames.members()],
+			                                     names=['dataset', 'methodName'])
+			AUC = pd.DataFrame(columns = columns)
+			F1  = pd.DataFrame(columns = columns)
+			ACC = pd.DataFrame(columns = columns)
 			
 			LOGIT    = MethodNames.LOGIT_BASED.name
 			LOSS     = MethodNames.LOSS_BASED.name
@@ -41,31 +42,31 @@ class Tables:
 			
 			for dt in DatasetNames.members():
 				df = TaxonomyXRV.run_full_experiment(methodName=MethodNames.LOGIT_BASED, dataset_name=dt)
-				auc[(dt, LOGIT)]    = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.AUC.name]
-				f1[(dt , LOGIT)]    = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
-				acc[(dt, LOGIT)]    = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.ACC.name]
+				AUC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
+				F1[ (dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
+				ACC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
 				
-				auc[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[EvaluationMetricNames.AUC.name]
-				f1[(dt , BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
-				acc[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[EvaluationMetricNames.ACC.name]
+				AUC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
+				F1[ (dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
+				ACC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
 				
 				df = TaxonomyXRV.run_full_experiment(methodName=MethodNames.LOSS_BASED, dataset_name=dt)
-				auc[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.AUC.name]
-				f1[(dt , LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
-				acc[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.ACC.name]
+				AUC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
+				F1[ (dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
+				ACC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
 			
-			auc = auc.apply(pd.to_numeric).round(3).replace(np.nan, '')
-			f1  = f1.apply(pd.to_numeric).round(3).replace(np.nan , '')
-			acc = acc.apply(pd.to_numeric).round(3).replace(np.nan, '')
+			AUC = AUC.apply(pd.to_numeric).round(3).replace(np.nan, '')
+			F1  = F1.apply( pd.to_numeric).round(3).replace(np.nan, '')
+			ACC = ACC.apply(pd.to_numeric).round(3).replace(np.nan, '')
 			
 			# region load Data & Model
 			@dataclass
 			class Metrics:
-				auc: pd.DataFrame
-				acc: pd.DataFrame
-				f1:  pd.DataFrame
+				AUC: pd.DataFrame
+				ACC: pd.DataFrame
+				F1: pd.DataFrame
 			
-			return Metrics(auc=auc, f1=f1, acc=acc)
+			return Metrics(AUC=AUC, F1=F1, ACC=ACC)
 		
 		metrics = get()
 		
@@ -78,39 +79,36 @@ class Tables:
 		
 		save_path = pathlib.Path('tables/metrics_all_datasets/table_datasets_samples.csv')
 		
-		def get() -> pd.DataFrame:
+		def get_PA_AP(mode: str, dname: str) -> pd.Series:
+			nonlocal mode, dname
 			
-			def get_PA_AP(mode: str, dname: str) -> pd.Series:
+			def combine_PA_AP(row):
+				return '' if (not row.PA) and (not row.AP) else f"{row.PA}/{row.AP}"
+			
+			df2 = pd.DataFrame(columns=['PA', 'AP'])
+			for views in ['PA', 'AP']:
 				
-				combine_PA_AP = lambda row: '' if (not row.PA) and (not row.AP) else f"{row.PA}/{row.AP}"
+				# Getting the dataset for a specific view
+				LD = LoadChestXrayDatasets.get_dataset_unfiltered(update_empty_parent_class=(mode == 'updated'), dataset_name=dname, views=views)
+				df2[views] = LD.labels.sum(axis=0).astype(int).replace(0, '')
 				
-				df2 = pd.DataFrame(columns=['PA', 'AP'])
-				for views in ['PA', 'AP']:
-					# Getting the dataset for a specific view
-					LD = LoadChestXrayDatasets.get_dataset_unfiltered(update_empty_parent_class=(mode == 'updated'),
-					                                                  dataset_name=dname, views=views)
-					df2[views] = LD.labels.sum(axis=0).astype(int).replace(0, '')
-					
-					# Adding the Total row
-					df2.loc['Total', views] = LD.labels.shape[0]
-				
-				return df2.apply(combine_PA_AP, axis=1)
+				# Adding the Total row
+				df2.loc['Total', views] = LD.labels.shape[0]
 			
-			columns = pd.MultiIndex.from_product([[ExperimentSTAGE.ORIGINAL.name, 'updated'], DatasetNames.members()])
-			df = pd.DataFrame(columns=columns)
-			
-			for mode, dname in itertools.product([ExperimentSTAGE.ORIGINAL.name, 'updated'], DatasetNames.members()):
-				df[(mode, dname)] = get_PA_AP(mode=mode, dname=dname)
-			
-			return df
+			return df2.apply(combine_PA_AP, axis=1)
+	
+		cln_list = [ExperimentSTAGE.members(), DatasetNames.members()]
+		columns = pd.MultiIndex.from_product(cln_list, names=['mode', 'dataset'])
+		df = pd.DataFrame(columns=columns)
 		
-		df = get()
-		
+		for mode, dname in itertools.product(*cln_list):
+			df[(mode, dname)] = get_PA_AP(mode=mode, dname=dname)
+			
 		if save_table:
 			LoadSaveFindings(self.config, save_path).save(df)
-		
+	
 		return df
-
+		
 
 class Visualize:
 	
@@ -143,8 +141,8 @@ class Visualize:
 				path.mkdir(parents=True, exist_ok=True)
 				
 				# Save the plot
-				for format in ['png', 'eps', 'svg', 'pdf']:
-					plt.savefig(path.joinpath(f'{filename}.{format}'), format=format, dpi=300)
+				for ft in ['png', 'eps', 'svg', 'pdf']:
+					plt.savefig(path.joinpath(f'{filename}.{ft}'), format=ft, dpi=300)
 			
 			colors = plt.cm.get_cmap('tab20', max(18, len(df_truth.columns)))
 			_, axes = plt.subplots(3, 6, figsize=(20, 10), sharex=True, sharey=True)
@@ -194,11 +192,10 @@ class Visualize:
 		import seaborn as sns
 		
 		def save_plot():
-			save_path = self.config.local_path.joinpath(
-				f'final/metrics_all_datasets/fig_metrics_AUC_ACC_F1_all_thresh_techniques/')
+			save_path = self.config.local_path / 'final/metrics_all_datasets/fig_metrics_AUC_ACC_F1_all_thresh_techniques/'
 			save_path.mkdir(parents=True, exist_ok=True)
-			for format in ['png', 'eps', 'svg', 'pdf']:
-				plt.savefig(save_path.joinpath(f'metrics_AUC_ACC_F1.{format}'), format=format, dpi=300)
+			for ft in ['png', 'eps', 'svg', 'pdf']:
+				plt.savefig(save_path.joinpath(f'metrics_AUC_ACC_F1.{ft}'), format=ft, dpi=300)
 		
 		def get_metrics():
 			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), MethodNames.members()])
@@ -218,15 +215,21 @@ class Visualize:
 		
 		def plot():
 			metric_df = get_metrics()
-			fig, axes = plt.subplots(3, 3, figsize=(21, 21), sharey=True, sharex=True)
+			fig, axes = plt.subplots(3, 3, figsize=(21, 21), sharey=True, sharex=True)  # type: ignore
 			sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True,
 			              rc=None)
 			
 			params = dict(legend=False, fontsize=16, kind='barh')
 			for i, thresh_technique in enumerate(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
-				metric_df[thresh_technique][EvaluationMetricNames.ACC.name].plot(ax=axes[i, 0], xlabel=EvaluationMetricNames.ACC.name, ylabel=thresh_technique, **params)
-				metric_df[thresh_technique][EvaluationMetricNames.AUC.name].plot(ax=axes[i, 1], xlabel=EvaluationMetricNames.AUC.name, ylabel=thresh_technique, **params)
-				metric_df[thresh_technique][EvaluationMetricNames.F1.name].plot(ax=axes[i, 2], xlabel=EvaluationMetricNames.F1.name, ylabel=thresh_technique, **params)
+				metric_df[thresh_technique][EvaluationMetricNames.ACC.name].plot(ax=axes[i, 0],
+				                                                                 xlabel=EvaluationMetricNames.ACC.name,
+				                                                                 ylabel=thresh_technique, **params)
+				metric_df[thresh_technique][EvaluationMetricNames.AUC.name].plot(ax=axes[i, 1],
+				                                                                 xlabel=EvaluationMetricNames.AUC.name,
+				                                                                 ylabel=thresh_technique, **params)
+				metric_df[thresh_technique][EvaluationMetricNames.F1.name].plot(ax=axes[i, 2],
+				                                                                xlabel=EvaluationMetricNames.F1.name,
+				                                                                ylabel=thresh_technique, **params)
 			
 			plt.legend(loc='lower right', fontsize=16)
 			plt.tight_layout()

@@ -6,7 +6,7 @@ import multiprocessing
 import os
 import pathlib
 import pickle
-import resource
+# import resource
 import sys
 from collections import defaultdict
 from copy import deepcopy
@@ -28,8 +28,7 @@ from tqdm import tqdm
 import torchxrayvision as xrv
 from taxonomy.utilities.data import Data, Findings, Hierarchy
 from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import ExperimentStageNames, DatasetNames, ThreshTechList, DataModes, MethodNames, \
-	EvaluationMetricNames, ModelNames, NodeData
+from taxonomy.utilities.params import ExperimentStageNames, DatasetNames, ThreshTechList, DataModes, MethodNames, EvaluationMetricNames, ModelNames, NodeData
 
 USE_CUDA = torch.cuda.is_available()
 
@@ -120,7 +119,7 @@ class LoadChestXrayDatasets:
 				More info: https://www.rsna.org/en/education/ai-resources-and-training/ai-image-challenge/RSNA-Pneumonia-Detection-Challenge-2018
 				Challenge site:	https://www.kaggle.com/c/rsna-pneumonia-detection-challenge
 				JPG files stored here: 	https://academictorrents.com/details/95588a735c9ae4d123f3ca408e56570409bcf2a9
-				
+
 			# CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison. https://arxiv.org/abs/1901.07031
 				Dataset website here: https://stanfordmlgroup.github.io/competitions/chexpert/
 
@@ -133,7 +132,7 @@ class LoadChestXrayDatasets:
 
 				Download resized (224x224) images here:
 				https://academictorrents.com/details/e615d3aebce373f1dc8bd9d11064da55bdadede0
-				
+
 			# PadChest: A large chest thresh_technique-ray image dataset with multi-label annotated reports. https://arxiv.org/abs/1901.07441
 				Note that images with null labels (as opposed to normal), and images that cannot
 				be properly loaded (listed as 'missing' in the code) are excluded, which makes
@@ -151,12 +150,12 @@ class LoadChestXrayDatasets:
 				VinBrain Dataset. Nguyen et al., VinDr-CXR: An open dataset of chest X-rays with radiologist's annotations
 				https://arxiv.org/abs/2012.15029
 				https://www.kaggle.com/c/vinbigdata-chest-xray-abnormalities-detection
-			
+
 			# MIMIC-CXR Dataset
 				Johnson AE,	MIMIC-CXR: A large publicly available database of labeled chest radiographs.
 				arXiv preprint arXiv:1901.07042. 2019 Jan 21.	https://arxiv.org/abs/1901.07042
 				Dataset website here:	https://physionet.org/content/mimic-cxr-jpg/2.0.0/
-			
+
 			# OpenI Dataset
 				Dina Demner-Fushman, Preparing a collection of radiology examinations for distribution and retrieval. Journal of the American
 				Medical Informatics Association, 2016. doi: 10.1093/jamia/ocv080.
@@ -165,7 +164,7 @@ class LoadChestXrayDatasets:
 				view defined by the record, set use_tsne_derived_view to true.
 				Dataset website: https://openi.nlm.nih.gov/faq
 				Download images: https://academictorrents.com/details/5a3a439df24931f410fac269b87b050203d9467d
-				
+
 			# NIH_Google Dataset
 				A relabelling of a subset of images from the NIH dataset.  The data tables should
 				be applied against an NIH download.  A test and validation split are provided in the
@@ -194,7 +193,7 @@ class LoadChestXrayDatasets:
 			'RSNA'      : dict(imgpath = imgpath, views = views , transform = transform),
 			'NIH_Google': dict(imgpath = imgpath, views = views)
 		}
-		
+
 		dataset_config = {
 			'NIH'       : xrv.datasets.NIH_Dataset,
 			'PC'        : xrv.datasets.PC_Dataset,
@@ -231,7 +230,7 @@ class LoadChestXrayDatasets:
 		child_dict = Hierarchy(classes=self.d_data.pathologies).child_dict
 
 		for parent, children in child_dict.items():
-			
+
 			# Checking if the parent class existed in the original pathologies in the dataset. will only replace its values if all its labels are NaN
 			if labels[parent].value_counts().values.shape[0] == 0:
 				if not self.config.silent: print(f"Parent class: {parent} is not in the dataset. replacing its true values according to its children presence.")
@@ -802,9 +801,7 @@ class HyperParameterTuning:
 		stop_requested = False
 
 		# Set the maximum number of open files
-		resource.setrlimit(resource.RLIMIT_NOFILE, (4096, 4096))
-
-		# do_PerClass = partial(extended_calculate_per_node(data=data, config=config, hyperparameters=initial_hp))
+		# resource.setrlimit(resource.RLIMIT_NOFILE, (4096, 4096))
 
 		PARALLELIZE = config.parallelization_technique
 
@@ -1044,10 +1041,10 @@ class MetricsAllTechniques:
 
 			truth = self.logit.proposed.truth
 			for methodName in EvaluationMetricNames.members():
-				
+
 				data = getattr(self, methodName.lower())
 				technique = MethodNames[methodName]
-				
+
 				line = get_fpr_tpr_auc(pred_node=data.pred[node], truth_node=truth[node], technique=technique, roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name])
 				lines.append(line.lines[-1])
 				labels.append(line.get_legend_handles_labels()[1][-1])
@@ -1132,12 +1129,12 @@ class TaxonomyXRV:
 			torch.backends.cudnn.benchmark     = False
 
 	def threshold(self, data_mode = DataModes.TRAIN):
-		
+
 		data = self.train if data_mode == DataModes.TRAIN else self.test
 
 		exp_stage_list   = [ExperimentStageNames.ORIGINAL.name       , ExperimentStageNames.NEW.name]
 		thresh_tech_list = [ThreshTechList.PRECISION_RECALL.name, ThreshTechList.ROC.name]
-		
+
 		df = pd.DataFrame(  index   = data.ORIGINAL.threshold.index ,
 							columns = pd.MultiIndex.from_product([thresh_tech_list, exp_stage_list]) )
 
@@ -1357,7 +1354,7 @@ class TaxonomyXRV:
 
 		if datasets_list is None:
 			datasets_list = DatasetNames
-			
+
 		def get(method: ExperimentStageNames) -> DataMerged:
 			data = defaultdict(list)
 			for dataset_name in datasets_list:
@@ -1575,7 +1572,7 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 			args.dataset_path = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.dataset_path)
 			args.path_baseline_CheX_weights = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.path_baseline_CheX_weights)
 			args.MLFlow_run_name = f'{args.dataset_name}-{args.modelName}'
-			
+
 			args.methodName   = MethodNames[args.methodName.upper()]
 			args.dataset_name = DatasetNames[args.dataset_name.upper()]
 			args.modelName    = ModelNames[args.modelName.upper()]
@@ -1588,3 +1585,4 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 
 if __name__ == '__main__':
 	pass
+
