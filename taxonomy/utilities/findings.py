@@ -165,9 +165,9 @@ class Visualize:
 		
 		# Get feature maps
 		if feature_maps is None:
-			feature_maps, labels, list_not_null_nodes = LoadModelXRV.extract_feature_maps(config=config,
+			feature_maps, labels, list_non_null_nodes = LoadModelXRV.extract_feature_maps(config=config,
 			                                                                              data_mode=data_mode)
-			labels = labels[list_not_null_nodes]
+			labels = labels[list_non_null_nodes]
 		
 		# Get Reduced features
 		X_embedded = get_reduced_features()
@@ -180,12 +180,12 @@ class Visualize:
 		
 		config = reading_user_input_arguments(dataset_name=dataset_name)
 		
-		feature_maps, labels, list_not_null_nodes = LoadModelXRV.extract_feature_maps(config=config,
+		feature_maps, labels, list_non_null_nodes = LoadModelXRV.extract_feature_maps(config=config,
 		                                                                              data_mode=data_mode)
 		
 		for method in ['UMAP', 'TSNE']:
 			Visualize.plot_class_relationships(config=config, method=method, data_mode=data_mode,
-			                                   feature_maps=feature_maps, labels=labels[list_not_null_nodes])
+			                                   feature_maps=feature_maps, labels=labels[list_non_null_nodes])
 	
 	def plot_metrics_all_thresh_techniques(self, save_figure=False):
 		

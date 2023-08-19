@@ -100,4 +100,4 @@ class LoadModelXRV:
 		with torch.no_grad():  # inference_mode no_grad
 			feature_maps, truth = looping_over_all_batches(data_loader=data.data_loader, n_batches_to_process=config.n_batches_to_process)
 		
-		return feature_maps , pd.DataFrame(truth, columns=model.pathologies), data.labels.nodes.not_null
+		return feature_maps , pd.DataFrame(truth, columns=model.pathologies), data.labels.nodes.non_null
