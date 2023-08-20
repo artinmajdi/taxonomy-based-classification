@@ -7,7 +7,7 @@ import pandas as pd
 
 from taxonomy.utilities.data import LoadChestXrayDatasets
 from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import DataModes, MethodNames, DatasetNames, EvaluationMetricNames, ThreshTechList, reading_user_input_arguments
+from taxonomy.utilities.params import DataModes, TechniqueNames, DatasetNames, EvaluationMetricNames, ThreshTechList, reading_user_input_arguments
 from taxonomy.utilities.utils import TaxonomyXRV, LoadSaveFindings
 
 
@@ -33,18 +33,18 @@ class Tables:
 					getattr(metricsa, m.value).to_excel(writer, sheet_name=m.name)
 		
 		def get():
-			columns = pd.MultiIndex.from_product([DatasetNames.members(), MethodNames.members()],
+			columns = pd.MultiIndex.from_product([DatasetNames.members(), TechniqueNames.members()],
 			                                     names=['dataset', 'methodName'])
 			AUC = pd.DataFrame(columns = columns)
 			F1  = pd.DataFrame(columns = columns)
 			ACC = pd.DataFrame(columns = columns)
 			
-			LOGIT    = MethodNames.LOGIT_BASED.name
-			LOSS     = MethodNames.LOSS_BASED.name
-			BASELINE = MethodNames.BASELINE.name
+			LOGIT    = TechniqueNames.LOGIT_BASED.name
+			LOSS     = TechniqueNames.LOSS_BASED.name
+			BASELINE = TechniqueNames.BASELINE.name
 			
 			for dt in DatasetNames.members():
-				df = TaxonomyXRV.run_full_experiment(methodName=MethodNames.LOGIT_BASED, datasetName=dt)
+				df = TaxonomyXRV.run_full_experiment(methodName=TechniqueNames.LOGIT_BASED, datasetName=dt)
 				AUC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
@@ -53,7 +53,7 @@ class Tables:
 				F1[ (dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
 				
-				df = TaxonomyXRV.run_full_experiment(methodName=MethodNames.LOSS_BASED, datasetName=dt)
+				df = TaxonomyXRV.run_full_experiment(methodName=TechniqueNames.LOSS_BASED, datasetName=dt)
 				AUC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
 				ACC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
@@ -214,7 +214,7 @@ class Visualize:
 				plt.savefig(save_path.joinpath(f'metrics_AUC_ACC_F1.{ft}'), format=ft, dpi=300)
 		
 		def get_metrics():
-			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), MethodNames.members()])
+			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), TechniqueNames.members()])
 			metric_df = {}
 			for thresh_technique in ThreshTechList:
 				output = TaxonomyXRV.get_all_metrics(datasets_list=DatasetNames.members(),

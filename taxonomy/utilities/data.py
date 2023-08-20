@@ -1,375 +1,24 @@
 import argparse
-import itertools
 import pathlib
-from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple, Union
 
-import networkx as nx
-import numpy as np
 import pandas as pd
-import plotly.graph_objs as go
-import seaborn as sns
 import torch
 import torchvision
-from torch.utils.data import DataLoader as torch_DataLoader
 
 import torchxrayvision as xrv
 from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import DatasetNames, EvaluationMetricNames, ExperimentStageNames, MethodNames, \
-	ModelFindingNames, NodeData, ThreshTechList
+from taxonomy.utilities.params import Data, DatasetNames, NodeData
 
 USE_CUDA = torch.cuda.is_available()
 
-
-@dataclass
-class Nodes:
-	CLASSES          : Set[str]
-	NON_NULL         : Set[str] 		   = field(default_factory = set)
-	IMPACTED         : Set[str] 		   = field(default_factory = set)
-	TAXONOMY         : Dict[str, Set[str]] = field(default_factory = dict)
-	EXIST_IN_TAXONOMY: Set[str] 	       = field(default_factory = set)
-
-	def __post_init__(self):
-		self.TAXONOMY          = self._taxonomy()
-		self.EXIST_IN_TAXONOMY = self._exist_in_taxonomy()
-
-	@staticmethod
-	def _default_taxonomy() -> Dict[str, Set[str]]:
-		return {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
-
-	def _taxonomy(self):  # sourcery skip: dict-comprehension
-		UT = {}
-		for parent in self._default_taxonomy().keys():
-			if parent in self.CLASSES:
-				UT[parent] = self._default_taxonomy()[parent].intersection(self.CLASSES)
-
-		return UT or None
-
-	def _exist_in_taxonomy(self) -> Set[str]:
-
-		# Adding the parent classes
-		eit = set(self.TAXONOMY.keys())
-
-		# Adding the children classes
-		for value in self.TAXONOMY.values():
-			eit.update(value)
-
-		return eit
-
-	@property
-	def node_thresh_tuple(self):
-		return list(itertools.product(self.IMPACTED, ThreshTechList))
-
-
-@dataclass
-class Labels:
-	LABEL_SET: Union[np.ndarray, pd.DataFrame]
-	CLASSES  : List[str]
-	nodes	 : Nodes = field(default_factory=lambda: None)
-
-	def __post_init__(self):
-		self.nodes: Nodes = Nodes(CLASSES=set(self.CLASSES))
-		self.LABEL_SET = pd.DataFrame(self.LABEL_SET, columns=self.CLASSES)
-
-		if self.LABEL_SET.size > 0:
-			self.nodes.NON_NULL    = self.LABEL_SET.columns[self.LABEL_SET.count() > 0].to_list()
-			self.nodes.IMPACTED    = [x for x in self.nodes.NON_NULL if x in self.nodes.EXIST_IN_TAXONOMY]
-
-
-@dataclass
-class Data:
-	dataset    : xrv.datasets.Dataset
-	data_loader: torch_DataLoader
-	labels     : Labels = field(default_factory = lambda: None)
-
-	def __post_init__(self):
-		self.labels = Labels(LABEL_SET=self.dataset.labels, CLASSES=self.dataset.pathologies)
-
-
-@dataclass(init=False)
-class DataMerged:
-	def __init__(self, data):
-		self.pred       = self.concat_data(data['pred'])
-		self.truth      = self.concat_data(data['truth'])
-		self.yhat       = self.concat_data(data['yhat']  , int)
-		self.auc_acc_f1 = pd.DataFrame(columns=self.pred.columns, index=EvaluationMetricNames.members())
-		self.list_nodes_impacted = [n for n in self.pred.columns if n in set().union(*data['list_nodes_impacted'])]
-
-	@staticmethod
-	def concat_data(data, dtype=None):
-		df = pd.concat(data, axis=0).reset_index(drop=True)
-		return df.astype(dtype) if dtype else df
-
-
-@dataclass
-class Metrics:
-	metrics_comparison: pd.DataFrame
-	proposed          : DataMerged
-
-
-@dataclass
-class MethodFindings:
-	logit_techniques: Metrics
-	loss_technique  : Metrics
-	baseline		: Metrics
-	data: Data
-
-
-class Findings:
-	list_metrics = EvaluationMetricNames.members() + ['Threshold']
-	list_arguments = ['metrics'] + ModelFindingNames.members()
-
-	def __init__(self, pathologies: List[str], experiment_stage: Union[str, ExperimentStageNames]):
-
-		self.experiment_stage = ExperimentStageNames[experiment_stage.upper()] if isinstance(experiment_stage,
-		                                                                                     str) else experiment_stage
-
-		self.pathologies = pathologies
-
-		# Initializing Metrics & Thresholds
-		columns = pd.MultiIndex.from_product([ThreshTechList, self.pathologies],
-		                                     names=['thresh_technique', 'pathologies'])
-
-		self.metrics = pd.DataFrame(columns=columns, index=Findings.list_metrics)
-
-		# Initializing Arguments & Findings
-		self.truth = pd.DataFrame(columns=pathologies)
-
-		if self.experiment_stage == ExperimentStageNames.ORIGINAL:
-			self.pred = pd.DataFrame(columns=pathologies)
-			self.logit = pd.DataFrame(columns=pathologies)
-			self.loss = pd.DataFrame(columns=pathologies)
-			self._results = {key: getattr(self, key) for key in Findings.list_arguments}
-
-		elif self.experiment_stage == ExperimentStageNames.NEW:
-			self.pred = pd.DataFrame(columns=columns)
-			self.logit = pd.DataFrame(columns=columns)
-			self.loss = pd.DataFrame(columns=columns)
-			self.hierarchy_penalty = pd.DataFrame(columns=columns)
-			self._results = {key: getattr(self, key) for key in Findings.list_arguments + ['hierarchy_penalty']}
-
-	@property
-	def results(self):
-		return self._results
-
-	@results.setter
-	def results(self, value):
-		self._results = value
-
-		if value is not None:
-			for key in Findings.list_arguments:
-				setattr(self, key, value[key])
-
-			if self.experiment_stage == ExperimentStageNames.NEW:
-				setattr(self, 'hierarchy_penalty', value['hierarchy_penalty'])
-
-
-@dataclass
-class Hierarchy:
-	classes: List[str]  = field(default_factory = list)
-	G      : nx.DiGraph = field(default_factory = lambda: None)
-
-	def __post_init__(self):
-		self.G       = Hierarchy.create_graph(classes = self.classes, hierarchy = self.hierarchy)
-		self.classes = list(set(self.classes))
-
-		# Creating the Graph
-		self.G = Hierarchy.create_graph(classes=self.classes, hierarchy=self.hierarchy)
-
-	@staticmethod
-	def create_graph(classes, hierarchy):
-		G = nx.DiGraph(hierarchy)
-		G.add_nodes_from(classes)
-		return G
-
-	def update_graph(self, classes=None, findings_original=None, findings_new=None, hyperparameters=None):
-
-		def add_nodes_and_edges(hierarchy=None):
-			if classes and len(classes) > 0: self.G.add_nodes_from(classes)
-			if hierarchy and len(hierarchy) > 0: self.G.add_edges_from(hierarchy)
-
-		def add_hyperparameters_to_graph():
-			for parent_node, child_node in self.G.edges:
-				self.G.edges[parent_node, child_node]['hyperparameters'] = {x: hyperparameters[x][child_node].copy() for
-				                                                            x in ThreshTechList}
-
-		def graph_add_findings_original_to_nodes(findings: dict):
-
-			# Loop over all classes (aka nodes)
-			for n in findings[ModelFindingNames.TRUTH].columns:
-
-				data = pd.DataFrame({m.value: findings[m][n] for m in ModelFindingNames})
-
-				metrics = {}
-				for x in ThreshTechList:
-					metrics[x] = findings['metrics'][x, n]
-
-				# Adding the findings to the graph node
-				self.G.nodes[n][ExperimentStageNames.ORIGINAL] = dict(data=data, metrics=metrics)
-
-		def graph_add_findings_new_to_nodes(findings: dict):
-
-			# Loop over all classes (aka nodes)
-			for n in findings['truth'].columns:
-
-				# Merging the pred, truth, and loss into a dataframe
-				data, metrics, hierarchy_penalty = {}, {}, pd.DataFrame()
-				for x in ThreshTechList:
-					data[x] = pd.DataFrame(
-						dict(truth=findings['truth'][n], pred=findings['pred'][x, n],
-						     loss=findings[MethodNames.LOSS_BASED.name][x, n]))
-					metrics[x] = findings['metrics'][x, n]
-					hierarchy_penalty[x] = findings['hierarchy_penalty'][x, n].values
-
-				# Adding the findings to the graph node
-				self.G.nodes[n][ExperimentStageNames.NEW] = dict(data=data, metrics=metrics)
-
-				# Updating the graph with the hierarchy_penalty for the current node
-				self.G.nodes[n]['hierarchy_penalty'] = hierarchy_penalty
-
-		if classes: add_nodes_and_edges()
-		if hyperparameters: add_hyperparameters_to_graph()
-		if findings_new: graph_add_findings_new_to_nodes(findings_new)
-		if findings_original: graph_add_findings_original_to_nodes(findings_original)
-
-	def add_hyperparameters_to_node(self, parent, child, a=1.0, b=0.0):  # type: (str, str, float, float) -> None
-		self.G.edges[parent, child]['a'] = a
-		self.G.edges[parent, child]['b'] = b
-
-	def graph_get_taxonomy_hyperparameters(self, parent_node, child_node):  # type: (str, str) -> Tuple[float, float]
-		return self.G.edges[parent_node, child_node]['hyperparameters']
-
-	@staticmethod
-	def get_node_original_results_for_child_and_parent_nodes(G: nx.DiGraph, node: str, thresh_technique: ThreshTechList=ThreshTechList.ROC) -> Tuple[NodeData, NodeData]:
-
-		# The predicted probability p, true label y, optimum threshold th, and loss for node class
-		child_data = Hierarchy.get_findings_for_node(G=G, node=node, thresh_technique=thresh_technique,
-		                                             experimentStage=ExperimentStageNames.ORIGINAL)
-
-		# The predicted probability p, true label y, optimum threshold th, and loss for parent class
-		parent_node = Hierarchy.get_parent_node(G=G, node=node)
-		parent_data = Hierarchy.get_findings_for_node(G=G, node=parent_node, thresh_technique=thresh_technique,
-		                                              experimentStage=ExperimentStageNames.ORIGINAL) if parent_node else None
-
-		return child_data, parent_data
-
-	@staticmethod
-	def get_findings_for_node(G: nx.DiGraph, node: str, thresh_technique: ThreshTechList, experimentStage: ExperimentStageNames):
-		WR = experimentStage
-		TT = thresh_technique
-
-		node_data = G.nodes[node]
-
-		if WR == ExperimentStageNames.ORIGINAL:
-			data    = node_data[WR]['data']
-			metrics = node_data[WR]['metrics'][TT]
-			hierarchy_penalty = None
-
-		elif WR == ExperimentStageNames.NEW:
-			data    = node_data[WR]['data'][TT]
-			metrics = node_data[WR]['metrics'][TT]
-			hierarchy_penalty = node_data['hierarchy_penalty']
-
-		else:
-			raise ValueError('experimentStage must be either ORIGINAL or NEW')
-
-		return NodeData(data=data, metrics=metrics, hierarchy_penalty=hierarchy_penalty)
-
-	@staticmethod
-	def get_parent_node(G, node):  # type: (nx.DiGraph, str) -> str
-		parent_node = nx.dag.ancestors(G, node)
-		return list(parent_node)[0] if (len(parent_node) > 0) else None
-
-	@property
-	def parent_dict(self):
-		p_dict = defaultdict(list)
-		for parent_i, its_children in self.hierarchy.items():
-			for child in its_children:
-				p_dict[child].append(parent_i)
-		return p_dict
-
-	@property
-	def child_dict(self):
-		return self.hierarchy
-
-	@property
-	def parent_child_df(self):
-		df = pd.DataFrame(columns=['parent', 'child'])
-		for p in self.hierarchy.keys():
-			for c in self.hierarchy[p]:
-				df = df.append({'parent': p, 'child': c}, ignore_index=True)
-		return df
-
-	def show(self, package='networkx'):
-
-		def plot_networkx_digraph(G):
-			pos = nx.spring_layout(G)
-			edge_x = []
-			edge_y = []
-			for edge in G.edges():
-				x0, y0 = pos[edge[0]]
-				x1, y1 = pos[edge[1]]
-				edge_x.append(x0)
-				edge_x.append(x1)
-				edge_x.append(None)
-				edge_y.append(y0)
-				edge_y.append(y1)
-				edge_y.append(None)
-
-			edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none',
-			                        mode='lines')
-
-			node_x = [pos[node][0] for node in G.nodes()]
-			node_y = [pos[node][1] for node in G.nodes()]
-
-			colorbar = dict(thickness=15, title='Node Connections', xanchor='left', titleside='right')
-			marker = dict(showscale=True, colorscale='Viridis', reversescale=True, color=[], size=10, line_width=2,
-			              colorbar=colorbar)
-
-			node_trace = go.Scatter(x=node_x, y=node_y, mode='markers', hoverinfo='text', marker=marker)
-
-			node_adjacency = []
-			node_text = []
-			for node, adjacency in enumerate(G.adjacency()):
-				node_adjacency.append(len(adjacency[1]))
-				node_text.append(f'{adjacency[0]} - # of connections: {len(adjacency[1])}')
-
-			node_trace.marker.color = node_adjacency
-			node_trace.text = node_text
-
-			# Add node labels
-			annotations = []
-			for node in G.nodes():
-				x, y = pos[node]
-				annotations.append(
-					go.layout.Annotation(text=str(node), x=x, y=y, showarrow=False, font=dict(size=10, color='black')))
-
-			layout = go.Layout(title='Networkx DiGraph',
-			                   showlegend = False,
-			                   hovermode  = 'closest',
-			                   margin     = dict(b    = 20, l = 5, r = 5, t = 40),
-			                   xaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
-			                   yaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
-			                   annotations = annotations
-			                   )
-			fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
-			fig.show()
-
-		if package == 'networkx':
-			sns.set_style("whitegrid")
-			nx.draw(self.G, with_labels=True)
-
-		elif package == 'plotly':
-			plot_networkx_digraph(self.G)
-
-
 @dataclass
 class LoadChestXrayDatasets:
-	config : argparse.Namespace   = field(default_factory = lambda: None)
-	dataset: xrv.datasets.Dataset = field(default_factory = lambda: None)
-	train  : Data                 = field(default_factory = lambda: None)
-	test   : Data                 = field(default_factory = lambda: None)
+	config  : argparse.Namespace   = field(default_factory = lambda: None)
+	dataset : xrv.datasets.Dataset = field(default_factory = lambda: None)
+	train   : Data                 = field(default_factory = lambda: None)
+	test    : Data                 = field(default_factory = lambda: None)
+	nodeData: NodeData             = field(default_factory = lambda: None)
 
 	def load_raw_database(self):
 		"""
@@ -437,20 +86,52 @@ class LoadChestXrayDatasets:
 				NIH data can be downloaded here:	https://academictorrents.com/details/e615d3aebce373f1dc8bd9d11064da55bdadede0
 		"""
 
-		imgpath   = self._path_dataset()
+		def _path_csv_files() -> pathlib.Path:
+			csv_path_dict = {
+					DatasetNames.NIH     : 'NIH/Data_Entry_2017.csv',
+					DatasetNames.RSNA    : None,
+					DatasetNames.PC      : 'PC/PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv',
+					DatasetNames.CheX    : f'CheX/CheXpert-v1.0-small/{self.config.dataset_data_mode}.csv',
+					DatasetNames.MIMIC   : 'MIMIC/mimic-cxr-2.0.0-chexpert.csv.gz',
+					DatasetNames.Openi   : 'Openi/nlmcxr_dicom_metadata.csv',
+					DatasetNames.NLMTB   : None,
+					DatasetNames.VinBrain: f'VinBrain/dicom/{self.config.dataset_data_mode}.csv',
+					}
+
+			return self.config.PATH_DATASETS / csv_path_dict.get(self.config.datasetName)
+
+		def _path_meta_data_csv_files() -> pathlib.Path | None:
+			meta_csv_path_dict = dict(MIMIC='MIMIC/mimic-cxr-2.0.0-metadata.csv.gz') # I don't have this csv file
+			return self.config.PATH_DATASETS / meta_csv_path_dict.get(self.config.datasetName)
+
+		def _path_dataset() -> pathlib.Path:
+			dataset_dir_dict = {
+					DatasetNames.NIH      : 'NIH/images-224',
+					DatasetNames.RSNA     : None,
+					DatasetNames.PC       : 'PC/images-224',
+					DatasetNames.CheX     : 'CheX/CheXpert-v1.0-small',
+					DatasetNames.MIMIC    : 'MIMIC/re_512_3ch',
+					DatasetNames.Openi    : 'Openi/NLMCXR_png',
+					DatasetNames.NLMTB    : None,
+					DatasetNames.VinBrain : f'VinBrain/{self.config.dataset_data_mode}'
+					}
+
+			return self.config.PATH_DATASETS / dataset_dir_dict.get(self.config.datasetName)
+
+		imgpath   = _path_dataset()
 		views     = self.config.views
-		csvpath   = self._path_csv_files()
+		csvpath   = _path_csv_files()
 		transform = torchvision.transforms.Compose([xrv.datasets.XRayCenterCrop(), xrv.datasets.XRayResizer(size = 224, engine = "cv2")])
 
 		params_config = {
-				DatasetNames.NIH       : dict(imgpath = imgpath, views = views),
-				DatasetNames.PC        : dict(imgpath = imgpath, views = views),
-				DatasetNames.CheXPERT  : dict(imgpath = imgpath, views = views , transform = transform , csvpath = csvpath),
-				DatasetNames.MIMIC     : dict(imgpath = imgpath, views = views, transform = transform, csvpath = csvpath, metacsvpath = self._path_meta_data_csv_files() ),
-				DatasetNames.Openi     : dict(imgpath = imgpath, views = views , transform = transform),
-				DatasetNames.VinBrain  : dict(imgpath = imgpath, views = views , csvpath   = csvpath),
-				DatasetNames.RSNA      : dict(imgpath = imgpath, views = views , transform = transform),
-				DatasetNames.NIH_Google: dict(imgpath = imgpath, views = views)
+				DatasetNames.NIH       : dict(imgpath=imgpath, views=views),
+				DatasetNames.PC        : dict(imgpath=imgpath, views=views),
+				DatasetNames.CheXPERT  : dict(imgpath=imgpath, views=views, transform=transform, csvpath=csvpath),
+				DatasetNames.MIMIC     : dict(imgpath=imgpath, views=views, transform=transform, csvpath=csvpath, metacsvpath=_path_meta_data_csv_files()),
+				DatasetNames.Openi     : dict(imgpath=imgpath, views=views, transform=transform),
+				DatasetNames.VinBrain  : dict(imgpath=imgpath, views=views, csvpath=csvpath),
+				DatasetNames.RSNA      : dict(imgpath=imgpath, views=views, transform=transform),
+				DatasetNames.NIH_Google: dict(imgpath=imgpath, views=views)
 				}
 
 		dataset_config = {
@@ -477,30 +158,26 @@ class LoadChestXrayDatasets:
 		# Aligning labels to have the same order as the pathologies' argument.
 		xrv.datasets.relabel_dataset( pathologies=LoadModelXRV.model_classes(self.config), dataset=self.dataset, silent=self.config.silent)
 
-	def update_empty_parent_class_based_on_its_children_classes(self):
+	def load(self):
 
-		labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+		def _update_empty_parent_class_based_on_its_children_classes():
 
-		# This will import the child_dict
-		child_dict = Hierarchy(classes=self.dataset.pathologies).child_dict
+			labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
 
-		for parent, children in child_dict.items():
+			for parent, children in self.nodeData.nodes.TAXONOMY.items():
 
-			# Checking if the parent class existed in the original pathologies in the dataset.
-			# Will only replace its values if all its labels are NaN
-			if labels[parent].value_counts().values.shape[0] == 0:
-				if not self.config.silent:
+				# Checking if the parent class existed in the original pathologies in the dataset. Will only replace its values if all its labels are NaN
+				if labels[parent].value_counts().values.shape[0] == 0:
+
 					print(f"Parent class: {parent} is not in the dataset. replacing its true values according to its children presence.")
 
-				# Initializing the parent label to 0
-				labels[parent] = 0
+					# Initializing the parent label to 0
+					labels[parent] = 0
 
-				# If at-least one of the children has a label of 1, then the parent label is 1
-				labels[parent][ labels[children].sum(axis=1) > 0 ] = 1
+					# If at-least one of the children has a label of 1, then the parent label is 1
+					labels[parent][ labels[children].sum(axis=1) > 0 ] = 1
 
-		self.dataset.labels = labels.values
-
-	def load(self):
+			self.dataset.labels = labels.values
 
 		def train_test_split():
 			labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
@@ -520,11 +197,8 @@ class LoadChestXrayDatasets:
 			columns = self.dataset.pathologies
 			labels  = pd.DataFrame( dataset.labels , columns=columns)
 
-			# This will import the child_dict
-			child_dict = Hierarchy(classes=self.dataset.pathologies).child_dict
-
 			# Looping through all parent classes in the taxonomy
-			for parent in child_dict.keys():
+			for parent in self.nodeData.nodes.TAXONOMY:
 
 				# Extracting the samples with a non-null value for the parent truth label
 				labels  = labels[ ~labels[parent].isna() ]
@@ -532,7 +206,7 @@ class LoadChestXrayDatasets:
 				labels  = pd.DataFrame( dataset.labels , columns=columns)
 
 				# Extracting the samples, where for each parent, at least one of their children has a non-null truth label
-				labels  = labels[ (~labels[ child_dict[parent] ].isna()).sum(axis=1) > 0 ]
+				labels  = labels[ (~labels[ self.nodeData.nodes.TAXONOMY[parent] ].isna()).sum(axis=1) > 0 ]
 				dataset = xrv.datasets.SubsetDataset(dataset, idxs=labels.index)
 				labels  = pd.DataFrame( dataset.labels , columns=columns)
 
@@ -546,7 +220,7 @@ class LoadChestXrayDatasets:
 
 		# Updating the empty parent labels with the child labels
 		if self.config.datasetName in [DatasetNames.PC , DatasetNames.NIH]:
-			self.update_empty_parent_class_based_on_its_children_classes()
+			_update_empty_parent_class_based_on_its_children_classes()
 
 		# Selecting non-null samples for impacted pathologies
 		if self.config.NotNull_Samples:
@@ -566,57 +240,9 @@ class LoadChestXrayDatasets:
 		self.train = Data(dataset=dataset_train, data_loader=data_loader_train)
 		self.test  = Data(dataset=dataset_test , data_loader=data_loader_test )
 
-
-	@staticmethod
-	def get_dataset_pathologies(datasetName):
-		pathologies_dict = dict(
-				NIH      = ["Atelectasis"                , "Consolidation", "Infiltration", "Pneumothorax", "Edema", "Emphysema", "Fibrosis", "Effusion", "Pneumonia", "Pleural_Thickening", "Cardiomegaly", "Nodule", "Mass", "Hernia"                                                                                                                                                                                                                                                                                   ],
-				RSNA     = ["Pneumonia"                  , "Lung Opacity"                                                                                                                                                                                                                                                                                                                                                                                                                                                 ],
-				PC       = ["Atelectasis"                , "Consolidation" , "Infiltration" , "Pneumothorax" , "Edema" , "Emphysema" , "Fibrosis" , "Effusion" , "Pneumonia" , "Pleural_Thickening" , "Cardiomegaly" , "Nodule" , "Mass" , "Hernia", "Fracture", "Granuloma", "Flattened Diaphragm", "Bronchiectasis", "Aortic Elongation", "Scoliosis", "Hilar Enlargement", "Tuberculosis", "Air Trapping", "Costophrenic Angle Blunting", "Aortic Atheromatosis", "Hemidiaphragm Elevation", "Support Devices", "Tube'"], # the Tube' is intentional
-				CheX     = ["Enlarged Cardiomediastinum" , "Cardiomegaly" , "Lung Opacity" , "Lung Lesion" , "Edema" , "Consolidation" , "Pneumonia" , "Atelectasis" , "Pneumothorax" , "Pleural Effusion" , "Pleural Other" , "Fracture" , "Support Devices"                                                                                                                                                                                                                                                             ],
-				MIMIC    = ["Enlarged Cardiomediastinum" , "Cardiomegaly" , "Lung Opacity" , "Lung Lesion" , "Edema" , "Consolidation" , "Pneumonia" , "Atelectasis" , "Pneumothorax" , "Pleural Effusion" , "Pleural Other" , "Fracture" , "Support Devices"                                                                                                                                                                                                                                                             ],
-				Openi    = ["Atelectasis"                , "Fibrosis" , "Pneumonia" , "Effusion" , "Lesion" , "Cardiomegaly" , "Calcified Granuloma" , "Fracture" , "Edema" , "Granuloma" , "Emphysema" , "Hernia" , "Mass" , "Nodule", "Opacity", "Infiltration", "Pleural_Thickening", "Pneumothorax"                                                                                                                                                                                                                   ],
-				NLMTB    = ["Tuberculosis"                                                                                                                                                                                                                                                                                                                                                                                                                                                                                ],
-				VinBrain = ['Aortic enlargement'         , 'Atelectasis', 'Calcification', 'Cardiomegaly', 'Consolidation', 'ILD', 'Infiltration', 'Lung Opacity', 'Nodule/Mass', 'Lesion', 'Effusion', 'Pleural_Thickening', 'Pneumothorax', 'Pulmonary Fibrosis'                                                                                                                                                                                                                                                        ]
-				)
-		return pathologies_dict[datasetName]
-
 	@property
 	def xrv_default_pathologies(self):
 		return  xrv.datasets.default_pathologies
-
-	def _path_csv_files(self) -> pathlib.Path:
-		csv_path_dict = {
-				DatasetNames.NIH     : 'NIH/Data_Entry_2017.csv',
-				DatasetNames.RSNA    : None,
-				DatasetNames.PC      : 'PC/PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv',
-				DatasetNames.CheX    : f'CheX/CheXpert-v1.0-small/{self.config.dataset_data_mode}.csv',
-				DatasetNames.MIMIC   : 'MIMIC/mimic-cxr-2.0.0-chexpert.csv.gz',
-				DatasetNames.Openi   : 'Openi/nlmcxr_dicom_metadata.csv',
-				DatasetNames.NLMTB   : None,
-				DatasetNames.VinBrain: f'VinBrain/dicom/{self.config.dataset_data_mode}.csv',
-		}
-
-		return self.config.PATH_DATASETS / csv_path_dict.get(self.config.datasetName)
-
-	def _path_meta_data_csv_files(self) -> pathlib.Path | None:
-
-		meta_csv_path_dict = dict(MIMIC='MIMIC/mimic-cxr-2.0.0-metadata.csv.gz') # I don't have this csv file
-		return self.config.PATH_DATASETS / meta_csv_path_dict.get(self.config.datasetName)
-
-	def _path_dataset(self) -> pathlib.Path:
-		dataset_dir_dict = {
-				DatasetNames.NIH      : 'NIH/images-224',
-				DatasetNames.RSNA     : None,
-				DatasetNames.PC       : 'PC/images-224',
-				DatasetNames.CheX     : 'CheX/CheXpert-v1.0-small',
-				DatasetNames.MIMIC    : 'MIMIC/re_512_3ch',
-				DatasetNames.Openi    : 'Openi/NLMCXR_png',
-				DatasetNames.NLMTB    : None,
-				DatasetNames.VinBrain : f'VinBrain/{self.config.dataset_data_mode}'
-				}
-
-		return self.config.PATH_DATASETS / dataset_dir_dict.get(self.config.datasetName)
 
 	@staticmethod
 	def format_image(img):
@@ -628,12 +254,3 @@ class LoadChestXrayDatasets:
 	@property
 	def available_datasets(self):
 		return [DatasetNames.CheXPERT, DatasetNames.NIH, DatasetNames.PC]
-
-	@property
-	def labels(self):
-		return pd.DataFrame(self.dataset.labels, columns=self.dataset.pathologies)
-
-
-
-
-

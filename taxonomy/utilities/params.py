@@ -2,13 +2,20 @@ from __future__ import annotations
 
 import argparse
 import enum
+import itertools
 import json
 import os
 import pathlib
 import sys
-from dataclasses import dataclass
-from typing import Union, Dict
+from dataclasses import dataclass, field
+from typing import Set, Tuple, Union, Dict
+
+import networkx as nx
+import numpy as np
 import pandas as pd
+from torch.utils.data import DataLoader as torch_DataLoader
+import torchxrayvision as xrv
+
 
 def members(cls):
 	
@@ -50,24 +57,184 @@ class ThreshTechList(enum.Enum):
 	DEFAULT          = 'DEFAULT'
 	ROC              = 'ROC'
 	PRECISION_RECALL = 'PRECISION_RECALL'
-	
-	
+
+
+@dataclass
+class Nodes:
+	CLASSES          : Set[str]
+	NON_NULL         : Set[str] 		   = field(default_factory = set)
+	IMPACTED         : Set[str] 		   = field(default_factory = set)
+	TAXONOMY         : Dict[str, Set[str]] = field(default_factory = dict)
+	EXIST_IN_TAXONOMY: Set[str] 	       = field(default_factory = set)
+
+	def __post_init__(self):
+		self.TAXONOMY          = self._taxonomy()
+		self.EXIST_IN_TAXONOMY = self._exist_in_taxonomy()
+
+	@staticmethod
+	def _default_taxonomy() -> Dict[str, Set[str]]:
+		return {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
+
+	def _taxonomy(self):  # sourcery skip: dict-comprehension
+		UT = {}
+		for parent in self._default_taxonomy():
+			if parent in self.CLASSES:
+				UT[parent] = self._default_taxonomy()[parent].intersection(self.CLASSES)
+
+		return UT or None
+
+	def _exist_in_taxonomy(self) -> Set[str]:
+
+		# Adding the parent classes
+		eit = set(self.TAXONOMY.keys())
+
+		# Adding the children classes
+		for value in self.TAXONOMY.values():
+			eit.update(value)
+
+		return eit
+
+	@property
+	def node_thresh_tuple(self):
+		return list(itertools.product(self.IMPACTED, ThreshTechList))
+
+	def get_children_of(self, parent: str) -> Set[str]:
+		return self.TAXONOMY.get(parent, set())
+
+	def get_parent_of(self, child: str) -> str | None:
+		return next((parent for parent in self.TAXONOMY if child in self.TAXONOMY[parent]), None)
+
+
+@dataclass
+class NodeData:
+	G    : nx.DiGraph = field(default_factory = lambda: None)
+	nodes: Nodes      = field(default_factory = lambda: None)
+
+	def __post_init__(self):
+		self.G = nx.DiGraph(self.nodes.TAXONOMY)
+		self.G.add_nodes_from(self.nodes.CLASSES)
+
+	def add_hyperparameters_to_node(self, parent_node: str, child_node: str, hyperparameter: dict[HyperparameterNames, float]):
+		for hp_name in hyperparameter:
+			self.G.edges[parent_node, child_node][hp_name] = hyperparameter[hp_name]
+
+	def get_hyperparameters_of_node(self, parent_node: str, child_node: str) -> dict[HyperparameterNames, float]:
+		return self.G.edges[parent_node, child_node]
+
+	def add_hierarchy_penalty(self, node: str, penalty: float):
+		self.G.nodes[node]['hierarchy_penalty'] = penalty
+
+	def get_hierarchy_penalty(self, node: str) -> float:
+		return self.G.nodes[node].get('hierarchy_penalty', None)
+
+	def show(self, package='networkx'):
+
+		import plotly.graph_objs as go
+		import seaborn as sns
+
+		def plot_networkx_digraph(G):
+			pos = nx.spring_layout(G)
+			edge_x = []
+			edge_y = []
+			for edge in G.edges():
+				x0, y0 = pos[edge[0]]
+				x1, y1 = pos[edge[1]]
+				edge_x.append(x0)
+				edge_x.append(x1)
+				edge_x.append(None)
+				edge_y.append(y0)
+				edge_y.append(y1)
+				edge_y.append(None)
+
+			edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none',
+									mode='lines')
+
+			node_x = [pos[node][0] for node in G.nodes()]
+			node_y = [pos[node][1] for node in G.nodes()]
+
+			colorbar = dict(thickness=15, title='Node Connections', xanchor='left', titleside='right')
+			marker = dict(showscale=True, colorscale='Viridis', reversescale=True, color=[], size=10, line_width=2,
+						  colorbar=colorbar)
+
+			node_trace = go.Scatter(x=node_x, y=node_y, mode='markers', hoverinfo='text', marker=marker)
+
+			node_adjacency = []
+			node_text = []
+			for node, adjacency in enumerate(G.adjacency()):
+				node_adjacency.append(len(adjacency[1]))
+				node_text.append(f'{adjacency[0]} - # of connections: {len(adjacency[1])}')
+
+			node_trace.marker.color = node_adjacency
+			node_trace.text = node_text
+
+			# Add node labels
+			annotations = []
+			for node in G.nodes():
+				x, y = pos[node]
+				annotations.append(
+						go.layout.Annotation(text=str(node), x=x, y=y, showarrow=False, font=dict(size=10, color='black')))
+
+			layout = go.Layout(title='Networkx DiGraph',
+							   showlegend = False,
+							   hovermode  = 'closest',
+							   margin     = dict(b    = 20, l = 5, r = 5, t = 40),
+							   xaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
+							   yaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
+							   annotations = annotations
+							   )
+			fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
+			fig.show()
+
+		if package == 'networkx':
+			sns.set_style("whitegrid")
+			nx.draw(self.G, with_labels=True)
+
+		elif package == 'plotly':
+			plot_networkx_digraph(self.G)
+
+
+@dataclass
+class Labels:
+	LABEL_SET: Union[np.ndarray, pd.DataFrame]
+	CLASSES  : list[str]
+	nodes	 : Nodes = field(default_factory=lambda: None)
+
+	def __post_init__(self):
+		self.nodes: Nodes = Nodes(CLASSES=set(self.CLASSES))
+		self.LABEL_SET = pd.DataFrame(self.LABEL_SET, columns=self.CLASSES)
+
+		if self.LABEL_SET.size > 0:
+			self.nodes.NON_NULL    = self.LABEL_SET.columns[self.LABEL_SET.count() > 0].to_list()
+			self.nodes.IMPACTED    = [x for x in self.nodes.NON_NULL if x in self.nodes.EXIST_IN_TAXONOMY]
+
+
 @members
 class DataModes(enum.Enum):
 	TRAIN = 'train'
 	TEST  = 'test'
 	ALL   = 'all'
-	
+
+
+@dataclass
+class Data:
+	dataset    : xrv.datasets.Dataset
+	data_loader: torch_DataLoader
+	labels     : Labels    = field(default_factory = lambda: None)
+	dataMode   : DataModes = field(default_factory = lambda: None)
+
+	def __post_init__(self):
+		self.labels = Labels(LABEL_SET=self.dataset.labels, CLASSES=self.dataset.pathologies)
+
 	
 @members
-class MethodNames(enum.Enum):
+class TechniqueNames(enum.Enum):
 	BASELINE = 'baseline'
 	LOGIT    = 'logit_based'
 	LOSS     = 'loss_based'
 
 
 @members
-class ModelNames(enum.Enum):
+class ModelWeightNames(enum.Enum):
 	PC                    = 'densenet121-res224-pc'
 	NIH                   = 'densenet121-res224-nih'
 	CHEXPERT              = 'densenet121-res224-chex'
@@ -85,21 +252,41 @@ class EvaluationMetricNames(enum.Enum):
 	ACC = 'acc'
 	AUC = 'auc'
 	F1  = 'f1'
-	
+	THRESHOLD = 'threshold'
+
+
+@dataclass
+class Metrics:
+	ACC: pd.DataFrame = field(default_factory = lambda: None)
+	AUC: pd.DataFrame = field(default_factory = lambda: None)
+	F1 : pd.DataFrame = field(default_factory = lambda: None)
+	THRESHOLD: dict[ThreshTechList, pd.DataFrame] = field(default_factory = lambda: None)
+
 
 @members
-class ModelFindingNames(enum.Enum):
-	GROUND_TRUTH = 'truth'
-	LOSS_VALUES  = 'loss'
-	LOGIT_VALUES = 'logit'
-	PRED_PROBS   = 'pred'
-	
-	
+class FindingNames(enum.Enum):
+	GROUND_TRUTH = 'ground_truth'
+	LOSS_VALUES  = 'loss_values'
+	LOGIT_VALUES = 'logit_values'
+	PRED_PROBS   = 'pred_probs'
+
+
 @dataclass
-class NodeData:
-	hierarchy_penalty: pd.DataFrame
-	metrics          : Union[Dict, pd.DataFrame]
-	data             : Union[pd.DataFrame, Dict[str, pd.DataFrame]]
+class Findings:
+	data           : Data                 = field(default_factory = lambda: None)
+	ground_truth   : pd.DataFrame         = field(default_factory = lambda: None)
+	loss_values    : pd.DataFrame         = field(default_factory = lambda: None)
+	logit_values   : pd.DataFrame         = field(default_factory = lambda: None)
+	pred_probs     : pd.DataFrame         = field(default_factory = lambda: None)
+	metrics        : Metrics              = field(default_factory = lambda: None)
+	nodeData	   : NodeData             = field(default_factory = lambda: None)
+	techniqueName  : TechniqueNames       = field(default_factory = lambda: None)
+	experimentStage: ExperimentStageNames = field(default_factory = lambda: None)
+
+@members
+class HyperparameterNames(enum.Enum):
+	A = 'a'
+	B = 'b'
 
 
 def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.json', **kwargs) -> argparse.Namespace:
@@ -190,9 +377,9 @@ def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.js
 			args.PATH_DATASETS         = PATH_BASE / args.PATH_DATASETS
 			args.PATH_CHEXPERT_WEIGHTS = PATH_BASE / args.PATH_CHEXPERT_WEIGHTS
 
-			args.methodName  = MethodNames[args.methodName.upper()]
+			args.methodName  = TechniqueNames[args.methodName.upper()]
 			args.datasetName = DatasetNames[args.datasetName.upper()]
-			args.modelName   = ModelNames[args.modelName.upper()]
+			args.modelName   = ModelWeightNames[args.modelName.upper()]
 
 			args.DEFAULT_FINDING_FOLDER_NAME = f'{args.datasetName}-{args.modelName}'
 

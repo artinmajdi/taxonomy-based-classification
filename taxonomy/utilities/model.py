@@ -9,7 +9,7 @@ import torch
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.params import ModelNames, DataModes
+from taxonomy.utilities.params import ModelWeightNames, DataModes
 from taxonomy.utilities.data import LoadChestXrayDatasets
 
 USE_CUDA = torch.cuda.is_available()
@@ -62,10 +62,10 @@ class LoadModelXRV:
 	config               : argparse.Namespace
 	model                : torch.nn.Module = field(default_factory = lambda: None)
 	chexpert_weights_path: pathlib.Path    = field(default_factory = lambda: None)
-	modelName            : ModelNames      = field(default_factory = lambda: ModelNames.ALL_224)
+	modelName            : ModelWeightNames      = field(default_factory = lambda: ModelWeightNames.ALL_224)
 
 	def __post_init__(self):
-		self.modelName            : ModelNames   = getattr(self.config, 'modelName', ModelNames.ALL_224)
+		self.modelName            : ModelWeightNames   = getattr(self.config, 'modelName', ModelWeightNames.ALL_224)
 		self.chexpert_weights_path: pathlib.Path = getattr(self.config, 'PATH_CHEXPERT_WEIGHTS', None)
 
 	def load(self, op_threshes: bool=False) -> torch.nn.Module:
@@ -74,10 +74,10 @@ class LoadModelXRV:
 
 			if 'baseline' in self.modelName.value:
 
-				if self.modelName is ModelNames.BASELINE_JFHEALTHCARE:
+				if self.modelName is ModelWeightNames.BASELINE_JFHEALTHCARE:
 					return xrv.baseline_models.jfhealthcare.DenseNet()
 
-				elif self.modelName is ModelNames.BASELINE_CHEX:
+				elif self.modelName is ModelWeightNames.BASELINE_CHEX:
 					return xrv.baseline_models.chexpert.DenseNet(weights_zip=self.chexpert_weights_path)
 
 			else:

@@ -24,7 +24,7 @@ from tqdm import tqdm
 import torchxrayvision as xrv
 from taxonomy.utilities.data import Data, Findings, Hierarchy, LoadChestXrayDatasets, Metrics
 from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, MethodNames, \
+from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, TechniqueNames, \
 	NodeData, reading_user_input_arguments, ThreshTechList
 
 USE_CUDA = torch.cuda.is_available()
@@ -218,7 +218,7 @@ class CalculateOriginalFindings:
 
 
 class CalculateNewFindings:
-	def __init__(self, model: torch.nn.Module, data: Data, hyperparameters: dict, config: argparse.Namespace, methodName: MethodNames):
+	def __init__(self, model: torch.nn.Module, data: Data, hyperparameters: dict, config: argparse.Namespace, methodName: TechniqueNames):
 
 		self.model            = model
 		self.hyperparameters  = hyperparameters
@@ -236,8 +236,8 @@ class CalculateNewFindings:
 			""" Return:   hierarchy_penalty: Array(index=sample_indices) """
 
 			def calculate_raw_weight(pdata) -> pd.Series:
-				if   methodName is MethodNames.LOGIT_BASED: return pd.Series(a * pdata.data.logit.to_numpy(), index=pdata.data.index)
-				elif methodName is MethodNames.LOSS_BASED:  return pd.Series(a * pdata.data.loss.to_numpy() + b, index=pdata.data.index)
+				if   methodName is TechniqueNames.LOGIT_BASED: return pd.Series(a * pdata.data.logit.to_numpy(), index=pdata.data.index)
+				elif methodName is TechniqueNames.LOSS_BASED:  return pd.Series(a * pdata.data.loss.to_numpy() + b, index=pdata.data.index)
 				else: raise ValueError(' methodName is not supproted')
 
 			def apply_parent_doesnot_exist_condition(hierarchy_penalty: pd.Series, pdata) -> np.ndarray:
@@ -268,8 +268,8 @@ class CalculateNewFindings:
 
 			ndata = Hierarchy.get_findings_for_node(G=G, node=node, thresh_technique=thresh_technique, experimentStage=ExperimentStageNames.ORIGINAL)
 
-			if   methodName is MethodNames.LOGIT_BASED: return np.zeros(len(ndata.data.index))
-			elif methodName is MethodNames.LOSS_BASED:  return np.ones(len(ndata.data.index))
+			if   methodName is TechniqueNames.LOGIT_BASED: return np.zeros(len(ndata.data.index))
+			elif methodName is TechniqueNames.LOSS_BASED:  return np.ones(len(ndata.data.index))
 
 			raise ValueError(' methodName is not supproted')
 
@@ -314,11 +314,11 @@ class CalculateNewFindings:
 
 			return pred_new.to_numpy(), logit_new.to_numpy()
 
-		if  config.methodName is MethodNames.LOGIT_BASED:
+		if  config.methodName is TechniqueNames.LOGIT_BASED:
 			pred_new, logit_new = do_approach1_per_node()
 			loss_new = np.ones(pred_new.shape) * np.nan
 
-		elif config.methodName is MethodNames.LOSS_BASED:
+		elif config.methodName is TechniqueNames.LOSS_BASED:
 			pred_new, loss_new  = do_approach2_per_node()
 			logit_new = np.ones(pred_new.shape) * np.nan
 		else:
@@ -383,7 +383,7 @@ class CalculateNewFindings:
 			for node in data.labels.nodes.non_null:
 				data = CalculateNewFindings.calculate_per_node( node=node, data=data, config=config, hyperparameters=hyperparameters, thresh_technique=x )
 
-		data.NEW.results = {key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', MethodNames.LOSS_BASED.name, 'hierarchy_penalty']}
+		data.NEW.results = {key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', TechniqueNames.LOSS_BASED.name, 'hierarchy_penalty']}
 
 		return data
 
@@ -400,7 +400,7 @@ class CalculateNewFindings:
 		LoadSaveFindings(self.config, self.save_path_full).save( self.data.NEW.results )
 
 	@classmethod
-	def get_updated_data(cls, model: torch.nn.Module, data: Data, hyperparameters: dict, config: argparse.Namespace, methodName: MethodNames) -> Data:
+	def get_updated_data(cls, model: torch.nn.Module, data: Data, hyperparameters: dict, config: argparse.Namespace, methodName: TechniqueNames) -> Data:
 
 		# Initializing the class
 		NEW = cls(model=model, data=data, hyperparameters=hyperparameters, config=config, methodName=methodName)
@@ -617,7 +617,7 @@ class MetricsAllTechniques:
 			ax      = axes[idx]
 
 			# Calculate the ROC curve and AUC
-			def get_fpr_tpr_auc(pred_node, truth_node, technique: MethodNames, roc_auc):
+			def get_fpr_tpr_auc(pred_node, truth_node, technique: TechniqueNames, roc_auc):
 
 				def get():
 					# mask = ~truth_node.isnull()
@@ -637,10 +637,10 @@ class MetricsAllTechniques:
 			lines, labels = [], []
 
 			truth = logit.proposed.truth
-			for methodName in MethodNames.members():
+			for methodName in TechniqueNames.members():
 
 				data = getattr(self, methodName.lower())
-				technique = MethodNames[methodName]
+				technique = TechniqueNames[methodName]
 
 				line = get_fpr_tpr_auc(pred_node=data.pred[node], truth_node=truth[node], technique=technique, roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name])
 				lines.append(line.lines[-1])
@@ -900,7 +900,7 @@ class TaxonomyXRV:
 		return LD.train, LD.test, model, LD.dataset
 
 	@classmethod
-	def run_full_experiment(cls, methodName=MethodNames.LOSS_BASED, seed=10, **kwargs):
+	def run_full_experiment(cls, methodName=TechniqueNames.LOSS_BASED, seed=10, **kwargs):
 
 		# Getting the user arguments
 		config = reading_user_input_arguments(jupyter=True, methodName=methodName.name, **kwargs)
@@ -937,7 +937,7 @@ class TaxonomyXRV:
 	@staticmethod
 	def loop_run_full_experiment():
 		for datasetName in DatasetNames.members():
-			for methodName in MethodNames:
+			for methodName in TechniqueNames:
 				TaxonomyXRV.run_full_experiment(methodName=methodName, datasetName=datasetName)
 
 	@classmethod
@@ -970,7 +970,7 @@ class TaxonomyXRV:
 		config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
 		save_path = pathlib.Path(f'tables/metrics_all_datasets/{thresh_technique}')
 
-		def apply_to_approach(methodName: MethodNames) -> Metrics:
+		def apply_to_approach(methodName: TechniqueNames) -> Metrics:
 
 			baseline, proposed = cls.get_merged_data(data_mode=data_mode, methodName=methodName, thresh_technique=thresh_technique, datasets_list=datasets_list)
 
@@ -1010,7 +1010,7 @@ class TaxonomyXRV:
 			return Metrics(metrics_comparison=metrics_comparison, baseline=baseline, proposed=proposed, config=config, methodName=methodName)
 
 		def get_auc_acc_f1_merged(logit, loss):  # type: (Metrics, Metrics) -> pd.DataFrame
-			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), MethodNames.members()])
+			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), TechniqueNames.members()])
 			auc_acc_f1 = pd.DataFrame(columns=columns)
 
 			for metric in EvaluationMetricNames.members():
@@ -1021,8 +1021,8 @@ class TaxonomyXRV:
 			return auc_acc_f1
 
 		if config.do_metrics == 'calculate':
-			logit 	   = apply_to_approach(MethodNames.LOGIT_BASED)
-			loss  	   = apply_to_approach(MethodNames.LOSS_BASED)
+			logit 	   = apply_to_approach(TechniqueNames.LOGIT_BASED)
+			loss  	   = apply_to_approach(TechniqueNames.LOSS_BASED)
 			auc_acc_f1 = get_auc_acc_f1_merged(logit, loss)
 
 			# Saving the metrics locally

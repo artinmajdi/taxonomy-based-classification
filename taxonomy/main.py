@@ -6,7 +6,7 @@ from taxonomy.utilities.utils import TaxonomyXRV, Visualize, CalculateOriginalFi
 
 # def loop():
 #     for datasetName in DatasetNames.members():
-#         for methodName in MethodNames.members():
+#         for methodName in TechniqueNames.members():
 #             TaxonomyXRV.run_full_experiment(methodName=methodName, datasetName=datasetName)
 
 if __name__ == '__main__':
