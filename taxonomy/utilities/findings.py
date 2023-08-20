@@ -5,8 +5,10 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from taxonomy.utilities.params import DataModes, MethodNames, DatasetNames, EvaluationMetricNames, ThreshTechList
-from taxonomy.utilities.utils import reading_user_input_arguments, TaxonomyXRV, LoadSaveFindings
+from taxonomy.utilities.data import LoadChestXrayDatasets
+from taxonomy.utilities.model import LoadModelXRV
+from taxonomy.utilities.params import DataModes, MethodNames, DatasetNames, EvaluationMetricNames, ThreshTechList, reading_user_input_arguments
+from taxonomy.utilities.utils import TaxonomyXRV, LoadSaveFindings
 
 
 class Tables:
@@ -17,7 +19,7 @@ class Tables:
 	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode=DataModes.TEST.value,
 	                                      thresh_technique='DEFAULT'):
 		
-		save_path = self.config.local_path.joinpath(
+		save_path = self.config.PATH_LOCAL.joinpath(
 			f'tables/metrics_per_dataset/{thresh_technique}/metrics_{data_mode}.xlsx')
 		
 		def save(metricsa):
@@ -42,7 +44,7 @@ class Tables:
 			BASELINE = MethodNames.BASELINE.name
 			
 			for dt in DatasetNames.members():
-				df = TaxonomyXRV.run_full_experiment(methodName=MethodNames.LOGIT_BASED, dataset_name=dt)
+				df = TaxonomyXRV.run_full_experiment(methodName=MethodNames.LOGIT_BASED, datasetName=dt)
 				AUC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
@@ -51,7 +53,7 @@ class Tables:
 				F1[ (dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
 				
-				df = TaxonomyXRV.run_full_experiment(methodName=MethodNames.LOSS_BASED, dataset_name=dt)
+				df = TaxonomyXRV.run_full_experiment(methodName=MethodNames.LOSS_BASED, datasetName=dt)
 				AUC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
 				ACC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
@@ -75,7 +77,20 @@ class Tables:
 			save(metrics)
 		
 		return metrics
-	
+
+	@staticmethod
+	def get_dataset_unfiltered(update_empty_parent_class=False, **kwargs):
+		config = reading_user_input_arguments(**kwargs)
+		model = LoadModelXRV(config).load()
+		LD = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
+		LD.load_raw_database()
+		LD.relabel_raw_database()
+
+		if update_empty_parent_class:
+			LD.update_empty_parent_class_based_on_its_children_classes()
+
+		return LD
+
 	def get_table_datasets_samples(self, save_table=True):
 		
 		save_path = pathlib.Path('tables/metrics_all_datasets/table_datasets_samples.csv')
@@ -90,7 +105,7 @@ class Tables:
 			for views in ['PA', 'AP']:
 				
 				# Getting the dataset for a specific view
-				LD = LoadChestXrayDatasets.get_dataset_unfiltered(update_empty_parent_class=(mode == 'updated'), dataset_name=dname, views=views)
+				LD = LoadChestXrayDatasets.get_dataset_unfiltered(update_empty_parent_class=(mode == 'updated'), datasetName=dname, views=views)
 				df2[views] = LD.labels.sum(axis=0).astype(int).replace(0, '')
 				
 				# Adding the Total row
@@ -121,7 +136,7 @@ class Visualize:
 	                             data_mode: DataModes = DataModes.TEST, feature_maps: Optional[np.ndarray] = None,
 	                             labels: Optional[Labels] = None) -> None:
 		
-		path_main = config.local_path.joinpath(f'{config.MLFlow_run_name}/class_relationship')
+		path_main = config.PATH_LOCAL.joinpath(f'{config.DEFAULT_FINDING_FOLDER_NAME}/class_relationship')
 		
 		def get_reduced_features() -> np.ndarray:
 			if method.upper() == 'UMAP':
@@ -156,7 +171,7 @@ class Visualize:
 				                s=20)
 				axes[i].set_title(node)
 			
-			plt.suptitle(f"{method} Visualization for {config.dataset_name} dataset")
+			plt.suptitle(f"{method} Visualization for {config.datasetName} dataset")
 			
 			# Save the plot
 			save_plot()
@@ -176,9 +191,9 @@ class Visualize:
 		do_plot(df_truth=labels)
 	
 	@staticmethod
-	def plot_class_relationships_objective_function(data_mode, dataset_name):
+	def plot_class_relationships_objective_function(data_mode, datasetName):
 		
-		config = reading_user_input_arguments(dataset_name=dataset_name)
+		config = reading_user_input_arguments(datasetName=datasetName)
 		
 		feature_maps, labels, list_non_null_nodes = LoadModelXRV.extract_feature_maps(config=config,
 		                                                                              data_mode=data_mode)
@@ -193,7 +208,7 @@ class Visualize:
 		import seaborn as sns
 		
 		def save_plot():
-			save_path = self.config.local_path / 'final/metrics_all_datasets/fig_metrics_AUC_ACC_F1_all_thresh_techniques/'
+			save_path = self.config.PATH_LOCAL / 'final/metrics_all_datasets/fig_metrics_AUC_ACC_F1_all_thresh_techniques/'
 			save_path.mkdir(parents=True, exist_ok=True)
 			for ft in ['png', 'eps', 'svg', 'pdf']:
 				plt.savefig(save_path.joinpath(f'metrics_AUC_ACC_F1.{ft}'), format=ft, dpi=300)
@@ -243,7 +258,7 @@ class Visualize:
 	def plot_metrics(config: argparse.Namespace, metrics: pd.DataFrame, thresh_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
 
 		def save_plot():
-			save_path = self.config.local_path.joinpath(f'figures/auc_acc_f1_all_datasets/{thresh_technique}/')
+			save_path = self.config.PATH_LOCAL.joinpath(f'figures/auc_acc_f1_all_datasets/{thresh_technique}/')
 			save_path.mkdir(parents=True, exist_ok=True)
 			for ft in ['png', 'eps', 'svg', 'pdf']:
 				plt.savefig( save_path.joinpath( f'metrics_AUC_ACC_F1.{ft}' ), format=ft, dpi=300 )

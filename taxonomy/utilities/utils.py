@@ -1,13 +1,10 @@
 import argparse
 import concurrent.futures
 import contextlib
-import json
 import multiprocessing
-import os
 import pathlib
 import pickle
 # import resource
-import sys
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
@@ -19,16 +16,16 @@ import pingouin as pg
 import seaborn as sns
 import sklearn
 import torch
-import torchvision
 from hyperopt import fmin, hp, tpe
 from matplotlib import pyplot as plt
 from scipy import stats
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.data import Data, Findings, Hierarchy, Metrics
+from taxonomy.utilities.data import Data, Findings, Hierarchy, LoadChestXrayDatasets, Metrics
 from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import ExperimentStageNames, DatasetNames, ThreshTechList, DataModes, MethodNames, EvaluationMetricNames, ModelNames, NodeData
+from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, MethodNames, \
+	NodeData, reading_user_input_arguments, ThreshTechList
 
 USE_CUDA = torch.cuda.is_available()
 
@@ -71,7 +68,7 @@ class SaveFigure:
 
 	def __init__(self, config, path=''):
 		self.config   = config
-		self.path    = self.config.local_path.joinpath(path)
+		self.path    = self.config.PATH_LOCAL.joinpath(path)
 
 	def load(self):
 		return plt.imread(self.path) if self.path.exists() else None
@@ -84,13 +81,14 @@ class SaveFigure:
 			path = self.path.with_suffix(f'.{format}')
 			plt.savefig(path, format=format, dpi=300)
 
+
 class LoadSaveFindings:
 	def __init__(self, config, relative_path: Union[str, pathlib.Path]='sth.pkl'):
 		""" relative_path can be one of [findings_original , findings_new, hyperparameters.pkl]"""
 
 		self.config   = config
 		self.relative_path = relative_path
-		self.path = self.config.local_path.joinpath(relative_path)
+		self.path = self.config.PATH_LOCAL.joinpath(relative_path)
 
 	def save(self, data, **kwargs):
 		SaveFile(self.path).dump(data, **kwargs)
@@ -107,7 +105,7 @@ class CalculateOriginalFindings:
 		self.n_batches_to_process = config   .n_batches_to_process
 		self.model                = model
 		self.config               = config
-		self.save_path_full       = f'details/{config.MLFlow_run_name}/baseline/findings_original_{data.data_mode}.pkl'
+		self.save_path_full       = f'details/{config.DEFAULT_}/baseline/findings_original_{data.data_mode}.pkl'
 
 		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage=ExperimentStageNames.ORIGINAL)
 		self.data = data
@@ -228,7 +226,7 @@ class CalculateNewFindings:
 		self.data             = data
 		config.methodName     = methodName
 		self.config           = config
-		self.save_path_full   = f'details/{config.MLFlow_run_name}/{methodName}/findings_new_{data.data_mode}.pkl'
+		self.save_path_full   = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{methodName}/findings_new_{data.data_mode}.pkl'
 
 	@staticmethod
 	def get_hierarchy_penalty_for_node(G, node, thresh_technique, parent_condition_mode, methodName, a, b=0) -> np.ndarray:
@@ -426,7 +424,7 @@ class HyperParameterTuning:
 		self.config      = config
 		self.data 		 = data
 		self.model       = model
-		self.save_path_full = f'details/{config.MLFlow_run_name}/{config.methodName}/hyperparameters.pkl'
+		self.save_path_full = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{config.methodName}/hyperparameters.pkl'
 		self.hyperparameters = None
 
 		# Initializing the data.NEW
@@ -561,7 +559,6 @@ def deserialize_object(state, cls):
 	return obj
 
 
-
 @dataclass
 class MetricsAllTechniques:
 	loss            : Metrics
@@ -587,7 +584,7 @@ class MetricsAllTechniques:
 	def plot_roc_curves(logit: Metrics, thresh_technique: ThreshTechList, config: argparse.Namespace, list_nodes_impacted: list, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
 
 		def save_plot():
-			save_path = config.local_path.joinpath( f'figures/roc_curve_all_datasets/{thresh_technique}/')
+			save_path = config.PATH_LOCAL.joinpath( f'figures/roc_curve_all_datasets/{thresh_technique}/')
 			save_path.mkdir(parents=True, exist_ok=True)
 			for ft in ['png', 'eps', 'svg', 'pdf']:
 				plt.savefig(save_path.joinpath(
@@ -702,10 +699,10 @@ class TaxonomyXRV:
 		self.train          : Optional[Data]                      = None
 		self.test           : Optional[Data]                      = None
 		self.model          : Optional[torch.nn.Module]           = None
-		self.d_data         : Optional[xrv.datasets.CheX_Dataset] = None
+		self.dataset         : Optional[xrv.datasets.CheX_Dataset] = None
 
 		methodName = config.methodName or EvaluationMetricNames.LOSS
-		self.save_path : str = f'details/{config.MLFlow_run_name}/{methodName}'
+		self.save_path : str = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{methodName}'
 
 		# Setting the seed
 		self.setting_random_seeds_for_pytorch(seed=seed)
@@ -859,7 +856,7 @@ class TaxonomyXRV:
 		for metric in EvaluationMetricNames.members() + ['Threshold']:
 
 			# Saving the data
-			path = self.config.local_path.joinpath( f'{self.save_path}/{metric}.xlsx' )
+			path = self.config.PATH_LOCAL.joinpath( f'{self.save_path}/{metric}.xlsx' )
 
 			# Create a new Excel writer
 			with pd.ExcelWriter(path, engine='openpyxl') as writer:
@@ -870,8 +867,6 @@ class TaxonomyXRV:
 
 				# Save the Excel file
 				# writer.save()
-
-
 
 	def get_metric(self, metric: EvaluationMetricNames=EvaluationMetricNames.AUC, data_mode: DataModes=DataModes.TRAIN) -> pd.DataFrame:
 
@@ -892,7 +887,6 @@ class TaxonomyXRV:
 
 		return df.T[column_names].T
 
-
 	@staticmethod
 	def get_data_and_model(config):
 
@@ -903,7 +897,7 @@ class TaxonomyXRV:
 		LD = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
 		LD.load()
 
-		return LD.train, LD.test, model, LD.d_data
+		return LD.train, LD.test, model, LD.dataset
 
 	@classmethod
 	def run_full_experiment(cls, methodName=MethodNames.LOSS_BASED, seed=10, **kwargs):
@@ -915,7 +909,7 @@ class TaxonomyXRV:
 		FE = cls(config=config, seed=seed)
 
 		# Loading train/test data as well as the pre-trained model
-		FE.train, FE.test, FE.model, FE.d_data = cls.get_data_and_model(FE.config)
+		FE.train, FE.test, FE.model, FE.dataset = cls.get_data_and_model(FE.config)
 
 		param_dict = {key: getattr(FE, key) for key in ['model', 'config']}
 
@@ -942,9 +936,9 @@ class TaxonomyXRV:
 
 	@staticmethod
 	def loop_run_full_experiment():
-		for dataset_name in DatasetNames.members():
+		for datasetName in DatasetNames.members():
 			for methodName in MethodNames:
-				TaxonomyXRV.run_full_experiment(methodName=methodName, dataset_name=dataset_name)
+				TaxonomyXRV.run_full_experiment(methodName=methodName, datasetName=datasetName)
 
 	@classmethod
 	def get_merged_data(cls, data_mode=DataModes.TEST, methodName='logit', thresh_technique='DEFAULT', datasets_list=None):  # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
@@ -954,8 +948,8 @@ class TaxonomyXRV:
 
 		def get(method: ExperimentStageNames) -> DataMerged:
 			data = defaultdict(list)
-			for dataset_name in datasets_list:
-				a1 = cls.run_full_experiment(methodName=methodName, dataset_name=dataset_name)
+			for datasetName in datasets_list:
+				a1 = cls.run_full_experiment(methodName=methodName, datasetName=datasetName)
 
 				metric = getattr( getattr(a1,data_mode),method.value)
 				data['pred'].append(metric.pred[thresh_technique] if method == ExperimentStageNames.NEW else metric.pred)
@@ -1071,115 +1065,16 @@ class TaxonomyXRV:
 			LM.load()
 			return LM
 
-		elif check_what in ('DT', 'labels', 'd_data', 'show_graph'):
+		elif check_what in ('DT', 'labels', 'dataset', 'show_graph'):
 			model = LoadModelXRV(config).load()
 			DT = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
 			DT.load()
 
 			if   check_what == 'DT':	     return DT
 			elif check_what == 'labels':     return getattr(DT, kwargs['data_mode']).labels
-			elif check_what == 'd_data': 	 return DT.d_data
+			elif check_what == 'dataset': 	 return DT.dataset
 			elif check_what == 'show_graph': DT.train.Hierarchy_cls.show(package=kwargs['package'])
 
 
-def reading_user_input_arguments(argv=None, jupyter=True, config_name='config.json', **kwargs) -> argparse.Namespace:
 
-	def parse_args() -> argparse.Namespace:
-		"""	Getting the arguments from the command line
-			Problem: 	Jupyter Notebook automatically passes some command-line arguments to the kernel.
-						When we run argparse.ArgumentParser.parse_args(), it tries to parse those arguments, which are not recognized by your argument parser.
-			Solution: 	To avoid this issue, you can modify your get_args() function to accept an optional list of command-line arguments, instead of always using sys.argv.
-						When this list is provided, the function will parse the arguments from it instead of the command-line arguments. """
-
-		# If argv is not provided, use sys.argv[1:] to skip the script name
-		args = [] if jupyter else (argv or sys.argv[1:])
-
-		args_list = [
-					# Dataset
-					dict(name = 'dataset_name', type = str, help = 'Name of the dataset'               ),
-					dict(name = 'data_mode'   , type = str, help = 'Dataset mode: train or valid'      ),
-					dict(name = 'max_sample'  , type = int, help = 'Maximum number of samples to load' ),
-
-					# Model
-					dict(name='modelName'   , type=str , help='Name of the pre_trained model.' ),
-					dict(name='architecture' , type=str , help='Name of the architecture'       ),
-
-					# Training
-					dict(name = 'batch_size'     , type = int   , help = 'Number of batches to process' ),
-					dict(name = 'n_epochs'       , type = int   , help = 'Number of epochs to process'  ),
-					dict(name = 'learning_rate'  , type = float , help = 'Learning rate'                ),
-					dict(name = 'n_augmentation' , type = int   , help = 'Number of augmentations'      ),
-
-					# Hyperparameter Optimization
-					dict(name = 'parent_condition_mode', type = str, help = 'Parent condition mode: truth or predicted' ),
-					dict(name = 'methodName'             , type = str, help = 'Hyper parameter optimization methodName' ),
-					dict(name = 'max_evals'            , type = int, help = 'Number of evaluations for hyper parameter optimization' ),
-					dict(name = 'n_batches_to_process' , type = int, help = 'Number of batches to process' ),
-
-					# MLFlow
-					dict(name='RUN_MLFLOW'            , type=bool  , help='Run MLFlow'                                             ),
-					dict(name='KILL_MLFlow_at_END'    , type=bool  , help='Kill MLFlow'                                            ),
-
-					# Config
-					dict(name='config'                , type=str   , help='Path to config file' , DEFAULT='config.json'             ),
-					]
-
-		# Initializing the parser
-		parser = argparse.ArgumentParser()
-
-		# Adding arguments
-		for g in args_list:
-			parser.add_argument(f'--{g["name"].replace("_","-")}', type=g['type'], help=g['help'], DEFAULT=g.get('DEFAULT')) # type: ignore
-
-		# Filter out any arguments starting with '-f'
-		filtered_argv = [arg for arg in args if not (arg.startswith('-f') or 'jupyter/runtime' in arg.lower())]
-
-		# Parsing the arguments
-		return parser.parse_args(args=filtered_argv)
-
-	def updating_config_with_kwargs(updated_args, kwargs):
-		if kwargs and len(kwargs) > 0:
-			for key in kwargs.keys():
-				updated_args[key] = kwargs[key]
-		return updated_args
-
-	def get_config(args):  # type: (argparse.Namespace) -> argparse.Namespace
-
-		# Loading the config.json file
-		config_dir = os.path.join(os.path.dirname(__file__), config_name if jupyter else args.config)
-
-		if os.path.exists(config_dir):
-			with open(config_dir) as f:
-				config_raw = json.load(f)
-
-			# converting args to dictionary
-			args_dict = vars(args) if args else {}
-
-			# Updating the config with the arguments as command line input
-			updated_args ={key: args_dict.get(key) or values for key, values in config_raw.items() }
-
-			# Updating the config. Used for facilitating the jupyter notebook access
-			updated_args = updating_config_with_kwargs(updated_args, kwargs)
-
-			# Convert the dictionary to a Namespace
-			args = argparse.Namespace(**updated_args)
-
-			# Updating the paths to their absolute path
-			args.local_path = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.local_path)
-			args.dataset_path = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.dataset_path)
-			args.path_baseline_CheX_weights = pathlib.Path(__file__).parent.parent.parent.parent.joinpath(args.path_baseline_CheX_weights)
-			args.MLFlow_run_name = f'{args.dataset_name}-{args.modelName}'
-
-			args.methodName   = MethodNames[args.methodName.upper()]
-			args.dataset_name = DatasetNames[args.dataset_name.upper()]
-			args.modelName    = ModelNames[args.modelName.upper()]
-
-		return args
-
-	# Updating the config file
-	return  get_config(args=parse_args())
-
-
-if __name__ == '__main__':
-	pass
 
