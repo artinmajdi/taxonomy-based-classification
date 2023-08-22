@@ -38,6 +38,6 @@
     "num_workers"                          : 1
   },
   "output": {
-    "path_local": "./main/aims/aim1_1_taxonomy/outputs",
+    "path_local": "./main/aims/aim1_1_taxonomy/outputs"
   }
 }

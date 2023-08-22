@@ -59,7 +59,7 @@ class Settings(pydantic.BaseSettings):
 	output                     : OutputSettings
 
 	class Config:
-		use_enum_values      = False
+		use_enum_values      = True
 		case_sensitive       = False
 		str_strip_whitespace = True
 
@@ -99,7 +99,7 @@ class Settings(pydantic.BaseSettings):
 # 				dict(name = 'n_batches_to_process' , type = int, help = 'Number of batches to process' ),
 #
 # 				# Config
-# 				dict(name='config'                , type=str   , help='Path to config file' , DEFAULT='config.json'             ),
+# 				dict(name='config'                , type=str   , help='Path to config file' , default='config.json'             ),
 # 				]
 #
 # 		# Initializing the parser
@@ -107,7 +107,7 @@ class Settings(pydantic.BaseSettings):
 #
 # 		# Adding arguments
 # 		for g in args_list:
-# 			parser.add_argument(f'--{g["name"].replace("_","-")}', type=g['type'], help=g['help'], DEFAULT=g.get('DEFAULT')) # type: ignore
+# 			parser.add_argument(f'--{g["name"].replace("_","-")}', type=g['type'], help=g['help'], default=g.get('default')) # type: ignore
 #
 # 		# Filter out any arguments starting with '-f'
 # 		filtered_argv = [arg for arg in args if not (arg.startswith('-f') or 'jupyter/runtime' in arg.lower())]
@@ -162,7 +162,7 @@ class Settings(pydantic.BaseSettings):
 
 def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings | ValueError:
 
-	def parse_args() -> argparse.Namespace:
+	def parse_args() -> dict:
 		"""	Getting the arguments from the command line
 			Problem:	Jupyter Notebook automatically passes some command-line arguments to the kernel.
 						When we run argparse.ArgumentParser.parse_args(), it tries to parse those arguments, which are not recognized by your argument parser.
@@ -176,24 +176,24 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 				# Dataset
 				dict(name = 'datasetNames', type = str, help = 'Name of the dataset'               ),
 				dict(name = 'data_mode'   , type = str, help = 'Dataset mode: train or valid'      ),
-				dict(name = 'max_samples'  , type = int, help = 'Maximum number of samples to load' ),
+				dict(name = 'max_samples' , type = int, help = 'Maximum number of samples to load' ),
 
 				# Model
 				dict(name='techniqueName'   , type=str , help='Name of the pre_trained model.' ),
 
 				# Training
-				dict(name = 'batch_size'     , type = int   , help = 'Number of batches to process' ),
-				dict(name = 'epochs'       , type = int   , help = 'Number of epochs to process'  ),
-				dict(name = 'learning_rate'  , type = float , help = 'Learning rate'                ),
-				dict(name = 'augmentation_count' , type = int   , help = 'Number of augmentations'      ),
+				dict(name = 'batch_size'        , type = int  , help = 'Number of batches to process' ),
+				dict(name = 'epochs'            , type = int  , help = 'Number of epochs to process'  ),
+				dict(name = 'learning_rate'     , type = float, help = 'Learning rate'                ),
+				dict(name = 'augmentation_count', type = int  , help = 'Number of augmentations'      ),
 
 				# Hyperparameter Optimization
 				dict(name = 'parent_metric_to_use', type = str, help = 'Parent condition mode: truth or predicted' ),
-				dict(name = 'max_evals'            , type = int, help = 'Number of evaluations for hyper parameter optimization' ),
-				dict(name = 'batches_to_process' , type = int, help = 'Number of batches to process' ),
+				dict(name = 'max_evals'           , type = int, help = 'Number of evaluations for hyper parameter optimization' ),
+				dict(name = 'batches_to_process'  , type = int, help = 'Number of batches to process' ),
 
 				# Config
-				dict(name='config'                , type=str   , help='Path to config file' , DEFAULT='config.json'             ),
+				dict(name='config'                , type=str   , help='Path to config file'),
 				]
 
 		# Initializing the parser
@@ -201,23 +201,22 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 
 		# Adding arguments
 		for g in args_list:
-			parser.add_argument(f'--{g["name"].replace("_","-")}', type=g['type'], help=g['help'], DEFAULT=g.get('DEFAULT')) # type: ignore
+			parser.add_argument(f'--{g["name"].replace("_","-")}', type=g['type'], help=g['help'], default=g.get('default')) # type: ignore
 
 		# Filter out any arguments starting with '-f'
 		filtered_argv = [arg for arg in args if not (arg.startswith('-f') or 'jupyter/runtime' in arg.lower())]
 
 		# Parsing the arguments
-		return parser.parse_args(args=filtered_argv)
+		parsed_args = parser.parse_args(args=filtered_argv)
 
-	def get_config(args: argparse.Namespace) -> Settings | ValueError:
+		return {k: v for k, v in vars(parsed_args).items() if v is not None}
+
+	def get_config(args_dict: argparse.Namespace) -> Settings | ValueError:
 
 		# Loading the config.json file
-		config_dir = os.path.join(os.path.dirname(__file__), config_name if jupyter else args.config)
+		config_dir = pathlib.Path(args_dict.get('config') or config_name).resolve()
 
-		# Converting the Namespace to a dictionary
-		args_dict = vars(args) if args else None
-
-		if not os.path.exists(config_dir):
+		if not config_dir.exists():
 			return ValueError(f'Config file not found at {config_dir}')
 
 		with open(config_dir) as f:
@@ -255,4 +254,4 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 		return config
 
 	# Updating the config file
-	return  get_config(args=parse_args())
+	return  get_config(args_dict=parse_args())
