@@ -1,23 +1,29 @@
 import argparse
+import itertools
 import pathlib
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 import pandas as pd
+import seaborn as sns
+import umap
+from matplotlib import pyplot as plt
 
-from taxonomy.utilities.data import LoadChestXrayDatasets
-from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import DataModes, TechniqueNames, DatasetNames, EvaluationMetricNames, ThreshTechList, reading_user_input_arguments
-from taxonomy.utilities.utils import TaxonomyXRV, LoadSaveFindings
+from taxonomy.utilities.data import Labels, LoadChestXrayDatasets
+from taxonomy.utilities.model import extract_feature_maps
+from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
+	TechniqueNames, ThreshTechList
+from taxonomy.utilities.settings import get_settings
+from taxonomy.utilities.utils import LoadSaveFindings, TaxonomyXRV
 
 
 class Tables:
 	
 	def __init__(self, jupyter=True, **kwargs):
-		self.config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
+		self.config = get_settings(jupyter=jupyter, **kwargs)
 	
-	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode=DataModes.TEST.value,
-	                                      thresh_technique='DEFAULT'):
+	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode=DataModes.TEST.value, thresh_technique='DEFAULT'):
 		
 		save_path = self.config.PATH_LOCAL.joinpath(
 			f'tables/metrics_per_dataset/{thresh_technique}/metrics_{data_mode}.xlsx')
@@ -79,16 +85,12 @@ class Tables:
 		return metrics
 
 	@staticmethod
-	def get_dataset_unfiltered(update_empty_parent_class=False, **kwargs):
-		config = reading_user_input_arguments(**kwargs)
-		model = LoadModelXRV(config).load()
-		LD = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
+	def get_dataset_unfiltered(**kwargs):
+		config = get_settings(**kwargs)
+		LD = LoadChestXrayDatasets( config=config )
 		LD.load_raw_database()
 		LD.relabel_raw_database()
-
-		if update_empty_parent_class:
-			LD.update_empty_parent_class_based_on_its_children_classes()
-
+		LD.update_empty_parent_class_based_on_its_children_classes()
 		return LD
 
 	def get_table_datasets_samples(self, save_table=True):
@@ -105,15 +107,15 @@ class Tables:
 			for views in ['PA', 'AP']:
 				
 				# Getting the dataset for a specific view
-				LD = LoadChestXrayDatasets.get_dataset_unfiltered(update_empty_parent_class=(mode == 'updated'), datasetName=dname, views=views)
-				df2[views] = LD.labels.sum(axis=0).astype(int).replace(0, '')
+				LD = Tables.get_dataset_unfiltered( datasetName=dname, views=views )
+				df2[views] = LD.dataset.labels.sum(axis=0).astype(int).replace(0, '')
 				
 				# Adding the Total row
-				df2.loc['Total', views] = LD.labels.shape[0]
+				df2.loc['Total', views] = LD.dataset.labels.shape[0]
 			
 			return df2.apply(combine_PA_AP, axis=1)
 	
-		cln_list = [ExperimentSTAGE.members(), DatasetNames.members()]
+		cln_list = [ExperimentStageNames.members(), DatasetNames.members()]
 		columns = pd.MultiIndex.from_product(cln_list, names=['mode', 'dataset'])
 		df = pd.DataFrame(columns=columns)
 		
@@ -129,7 +131,7 @@ class Tables:
 class Visualize:
 	
 	def __init__(self, jupyter=True, **kwargs):
-		self.config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
+		self.config = get_settings(jupyter=jupyter, **kwargs)
 	
 	@staticmethod
 	def plot_class_relationships(config: argparse.Namespace, method: str = 'TSNE',
@@ -180,7 +182,7 @@ class Visualize:
 		
 		# Get feature maps
 		if feature_maps is None:
-			feature_maps, labels, list_non_null_nodes = LoadModelXRV.extract_feature_maps(config=config,
+			feature_maps, labels, list_non_null_nodes = extract_feature_maps(config=config,
 			                                                                              data_mode=data_mode)
 			labels = labels[list_non_null_nodes]
 		
@@ -193,19 +195,15 @@ class Visualize:
 	@staticmethod
 	def plot_class_relationships_objective_function(data_mode, datasetName):
 		
-		config = reading_user_input_arguments(datasetName=datasetName)
+		config = get_settings(datasetName=datasetName)
 		
-		feature_maps, labels, list_non_null_nodes = LoadModelXRV.extract_feature_maps(config=config,
-		                                                                              data_mode=data_mode)
+		feature_maps, labels, list_non_null_nodes = extract_feature_maps(config=config, data_mode=data_mode)
 		
 		for method in ['UMAP', 'TSNE']:
 			Visualize.plot_class_relationships(config=config, method=method, data_mode=data_mode,
 			                                   feature_maps=feature_maps, labels=labels[list_non_null_nodes])
 	
 	def plot_metrics_all_thresh_techniques(self, save_figure=False):
-		
-		import matplotlib.pyplot as plt
-		import seaborn as sns
 		
 		def save_plot():
 			save_path = self.config.PATH_LOCAL / 'final/metrics_all_datasets/fig_metrics_AUC_ACC_F1_all_thresh_techniques/'
@@ -257,8 +255,9 @@ class Visualize:
 	@staticmethod
 	def plot_metrics(config: argparse.Namespace, metrics: pd.DataFrame, thresh_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
 
+
 		def save_plot():
-			save_path = self.config.PATH_LOCAL.joinpath(f'figures/auc_acc_f1_all_datasets/{thresh_technique}/')
+			save_path = config.PATH_LOCAL.joinpath(f'figures/auc_acc_f1_all_datasets/{thresh_technique}/')
 			save_path.mkdir(parents=True, exist_ok=True)
 			for ft in ['png', 'eps', 'svg', 'pdf']:
 				plt.savefig( save_path.joinpath( f'metrics_AUC_ACC_F1.{ft}' ), format=ft, dpi=300 )
@@ -277,9 +276,6 @@ class Visualize:
 
 
 		def heatmap():
-			import seaborn as sns
-			import matplotlib.pyplot as plt
-
 			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
 
 			fig, axes = plt.subplots(1, 3, figsize=figsize, sharey=True)  # type: ignore

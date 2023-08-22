@@ -1530,7 +1530,7 @@ class NLMTB_Dataset(Dataset):
     Note that each dataset should be loaded separately by this class (they
     may be merged afterwards).  All images are of view PA.
 
-    Jaeger S, Candemir S, Antani S, Wang YX, Lu PX, Thoma G. Two public chest
+    Jaeger S, Candemir S, Antani S, Wang YX, Lu PX, Thoma graph. Two public chest
     X-ray datasets for computer-aided screening of pulmonary diseases. Quant
     Imaging Med Surg. 2014 Dec;4(6):475-7. doi:
     10.3978/j.issn.2223-4292.2014.11.20. PMID: 25525580; PMCID: PMC4256233.

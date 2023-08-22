@@ -1,7 +1,7 @@
 import argparse
 import pathlib
 from dataclasses import dataclass, field
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 import pandas as pd
@@ -9,8 +9,8 @@ import torch
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.params import ModelWeightNames, DataModes
-from taxonomy.utilities.data import LoadChestXrayDatasets
+from taxonomy.utilities.params import DataModes, ModelWeightNames
+
 
 USE_CUDA = torch.cuda.is_available()
 
@@ -22,7 +22,8 @@ def extract_feature_maps(config: argparse.Namespace, data_mode: DataModes=DataMo
 		return LM.load()
 
 	def _get_data():
-		LD = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
+		from taxonomy.utilities.data import LoadChestXrayDatasets
+		LD = LoadChestXrayDatasets( config=config )
 		LD.load()
 		return getattr(LD, data_mode.value)
 

@@ -1,16 +1,211 @@
 import argparse
+import itertools
 import pathlib
 from dataclasses import dataclass, field
+from functools import cached_property
+from typing import Union
 
+import networkx as nx
+import numpy as np
 import pandas as pd
 import torch
 import torchvision
+from torch.utils.data import DataLoader as torch_DataLoader
 
 import torchxrayvision as xrv
-from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import Data, DatasetNames, NodeData
+from taxonomy.utilities.params import DataModes, DatasetNames, ExperimentStageNames, HyperparameterNames, \
+	TechniqueNames, ThreshTechList
 
 USE_CUDA = torch.cuda.is_available()
+
+
+@dataclass
+class Nodes:
+	CLASSES          : set[str]
+	NON_NULL         : set[str] 		   = field(default_factory = set)
+	IMPACTED         : set[str] 		   = field(default_factory = set)
+	TAXONOMY         : dict[str, set[str]] = field(default_factory = dict)
+	EXIST_IN_TAXONOMY: set[str] 	       = field(default_factory = set)
+
+	def __post_init__(self):
+		self.TAXONOMY          = self._taxonomy()
+		self.EXIST_IN_TAXONOMY = self._exist_in_taxonomy()
+
+	@staticmethod
+	def _default_taxonomy() -> dict[str, set[str]]:
+		return {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
+
+	def _taxonomy(self):  # sourcery skip: dict-comprehension
+		UT = {}
+		for parent in self._default_taxonomy():
+			if parent in self.CLASSES:
+				UT[parent] = self._default_taxonomy()[parent].intersection(self.CLASSES)
+
+		return UT or None
+
+	def _exist_in_taxonomy(self) -> set[str]:
+
+		# Adding the parent classes
+		eit = set(self.TAXONOMY.keys())
+
+		# Adding the children classes
+		for value in self.TAXONOMY.values():
+			eit.update(value)
+
+		return eit
+
+	@property
+	def node_thresh_tuple(self):
+		return list(itertools.product(self.IMPACTED, ThreshTechList))
+
+	def get_children_of(self, parent: str) -> set[str]:
+		return self.TAXONOMY.get(parent, set())
+
+	def get_parent_of(self, child: str) -> str | None:
+		return next((parent for parent in self.TAXONOMY if child in self.TAXONOMY[parent]), None)
+
+
+@dataclass
+class NodeData:
+	CLASSES: set[str]
+
+	def __post_init__(self):
+		self.graph = self._construct_graph()
+
+	@cached_property
+	def nodes(self) -> Nodes:
+		return Nodes(CLASSES=self.CLASSES)
+
+	def _construct_graph(self) -> nx.DiGraph:
+		graph = nx.DiGraph(self.nodes.TAXONOMY)
+		graph.add_nodes_from(self.nodes.CLASSES)
+		return graph
+
+	def add_hyperparameters_to_node(self, parent_node: str, child_node: str, hyperparameter: dict[HyperparameterNames, float]):
+		for hp_name in hyperparameter:
+			self.graph.edges[parent_node, child_node][hp_name] = hyperparameter[hp_name]
+
+	def get_hyperparameters_of_node(self, parent_node: str, child_node: str) -> dict[HyperparameterNames, float]:
+		return self.graph.edges[parent_node, child_node]
+
+	def add_hierarchy_penalty(self, node: str, penalty: float):
+		self.graph.nodes[node]['hierarchy_penalty'] = penalty
+
+	def get_hierarchy_penalty(self, node: str) -> float:
+		return self.graph.nodes[node].get('hierarchy_penalty', None)
+
+	def show(self, package='networkx'):
+
+		import plotly.graph_objs as go
+		import seaborn as sns
+
+		def plot_networkx_digraph(graph):
+			pos = nx.spring_layout(graph)
+			edge_x = []
+			edge_y = []
+			for edge in graph.edges():
+				x0, y0 = pos[edge[0]]
+				x1, y1 = pos[edge[1]]
+				edge_x.append(x0)
+				edge_x.append(x1)
+				edge_x.append(None)
+				edge_y.append(y0)
+				edge_y.append(y1)
+				edge_y.append(None)
+
+			edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none',
+									mode='lines')
+
+			node_x = [pos[node][0] for node in graph.nodes()]
+			node_y = [pos[node][1] for node in graph.nodes()]
+
+			colorbar = dict(thickness=15, title='Node Connections', xanchor='left', titleside='right')
+			marker = dict(showscale=True, colorscale='Viridis', reversescale=True, color=[], size=10, line_width=2,
+						  colorbar=colorbar)
+
+			node_trace = go.Scatter(x=node_x, y=node_y, mode='markers', hoverinfo='text', marker=marker)
+
+			node_adjacency = []
+			node_text = []
+			for node, adjacency in enumerate(graph.adjacency()):
+				node_adjacency.append(len(adjacency[1]))
+				node_text.append(f'{adjacency[0]} - # of connections: {len(adjacency[1])}')
+
+			node_trace.marker.color = node_adjacency
+			node_trace.text = node_text
+
+			# Add node labels
+			annotations = []
+			for node in graph.nodes():
+				x, y = pos[node]
+				annotations.append(
+						go.layout.Annotation(text=str(node), x=x, y=y, showarrow=False, font=dict(size=10, color='black')))
+
+			layout = go.Layout(title='Networkx DiGraph',
+							   showlegend = False,
+							   hovermode  = 'closest',
+							   margin     = dict(b    = 20, l = 5, r = 5, t = 40),
+							   xaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
+							   yaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
+							   annotations = annotations
+							   )
+			fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
+			fig.show()
+
+		if package == 'networkx':
+			sns.set_style("whitegrid")
+			nx.draw(self.graph, with_labels=True)
+
+		elif package == 'plotly':
+			plot_networkx_digraph(self.graph)
+
+
+@dataclass
+class Labels:
+	LABEL_SET: Union[np.ndarray, pd.DataFrame]
+	CLASSES  : list[str]
+	nodes	 : Nodes = field(default_factory=lambda: None)
+
+	def __post_init__(self):
+		self.nodes: Nodes = Nodes(CLASSES=set(self.CLASSES))
+		self.LABEL_SET = pd.DataFrame(self.LABEL_SET, columns=self.CLASSES)
+
+		if self.LABEL_SET.size > 0:
+			self.nodes.NON_NULL    = self.LABEL_SET.columns[self.LABEL_SET.count() > 0].to_list()
+			self.nodes.IMPACTED    = [x for x in self.nodes.NON_NULL if x in self.nodes.EXIST_IN_TAXONOMY]
+
+
+@dataclass
+class Data:
+	dataset    : xrv.datasets.Dataset
+	data_loader: torch_DataLoader
+	labels     : Labels    = field(default_factory = lambda: None)
+	dataMode   : DataModes = field(default_factory = lambda: None)
+
+	def __post_init__(self):
+		self.labels = Labels(LABEL_SET=self.dataset.labels, CLASSES=self.dataset.pathologies)
+
+
+@dataclass
+class Metrics:
+	ACC: pd.DataFrame = field(default_factory = lambda: None)
+	AUC: pd.DataFrame = field(default_factory = lambda: None)
+	F1 : pd.DataFrame = field(default_factory = lambda: None)
+	THRESHOLD: dict[ThreshTechList, pd.DataFrame] = field(default_factory = lambda: None)
+
+
+@dataclass
+class Findings:
+	data           : Data                 = field(default_factory = lambda: None)
+	ground_truth   : pd.DataFrame         = field(default_factory = lambda: None)
+	loss_values    : pd.DataFrame         = field(default_factory = lambda: None)
+	logit_values   : pd.DataFrame         = field(default_factory = lambda: None)
+	pred_probs     : pd.DataFrame         = field(default_factory = lambda: None)
+	metrics        : Metrics              = field(default_factory = lambda: None)
+	nodeData	   : NodeData             = field(default_factory = lambda: None)
+	techniqueName  : TechniqueNames       = field(default_factory = lambda: None)
+	experimentStage: ExperimentStageNames = field(default_factory = lambda: None)
+
 
 @dataclass
 class LoadChestXrayDatasets:
@@ -126,7 +321,7 @@ class LoadChestXrayDatasets:
 		params_config = {
 				DatasetNames.NIH       : dict(imgpath=imgpath, views=views),
 				DatasetNames.PC        : dict(imgpath=imgpath, views=views),
-				DatasetNames.CheXPERT  : dict(imgpath=imgpath, views=views, transform=transform, csvpath=csvpath),
+				DatasetNames.CHEXPERT  : dict(imgpath=imgpath, views=views, transform=transform, csvpath=csvpath),
 				DatasetNames.MIMIC     : dict(imgpath=imgpath, views=views, transform=transform, csvpath=csvpath, metacsvpath=_path_meta_data_csv_files()),
 				DatasetNames.Openi     : dict(imgpath=imgpath, views=views, transform=transform),
 				DatasetNames.VinBrain  : dict(imgpath=imgpath, views=views, csvpath=csvpath),
@@ -137,7 +332,7 @@ class LoadChestXrayDatasets:
 		dataset_config = {
 				DatasetNames.NIH       : xrv.datasets.NIH_Dataset,
 				DatasetNames.PC        : xrv.datasets.PC_Dataset,
-				DatasetNames.CheXPERT  : xrv.datasets.CheX_Dataset,
+				DatasetNames.CHEXPERT  : xrv.datasets.CheX_Dataset,
 				DatasetNames.MIMIC     : xrv.datasets.MIMIC_Dataset,
 				DatasetNames.Openi     : xrv.datasets.Openi_Dataset,
 				DatasetNames.VinBrain  : xrv.datasets.VinBrain_Dataset,
@@ -145,9 +340,11 @@ class LoadChestXrayDatasets:
 				DatasetNames.NIH_Google: xrv.datasets.NIH_Google_Dataset
 				}
 
-		return dataset_config.get(self.config.datasetName)(**params_config.get(self.config.datasetName))
+		self.dataset = dataset_config.get(self.config.datasetName)(**params_config.get(self.config.datasetName))
 
 	def relabel_raw_database(self):
+		from taxonomy.utilities.model import LoadModelXRV
+
 		# Adding the PatientID if it doesn't exist
 		# if "patientid" not in self.dataset.csv:
 		# 	self.dataset.csv["patientid"] = [ f"{self.dataset.__class__.__name__}-{i}" for i in range(len(self.dataset)) ]
@@ -158,84 +355,74 @@ class LoadChestXrayDatasets:
 		# Aligning labels to have the same order as the pathologies' argument.
 		xrv.datasets.relabel_dataset( pathologies=LoadModelXRV.model_classes(self.config), dataset=self.dataset, silent=self.config.silent)
 
+	def update_empty_parent_class_based_on_its_children_classes(self):
+
+		labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+
+		for parent, children in self.nodeData.nodes.TAXONOMY.items():
+
+			# Checking if the parent class existed in the original pathologies in the dataset. Will only replace its values if all its labels are NaN
+			if labels[parent].value_counts().values.shape[0] == 0:
+
+				print(f"Parent class: {parent} is not in the dataset. replacing its true values according to its children presence.")
+
+				# Initializing the parent label to 0
+				labels[parent] = 0
+
+				# If at-least one of the children has a label of 1, then the parent label is 1
+				labels[parent][ labels[children].sum(axis=1) > 0 ] = 1
+
+		self.dataset.labels = labels.values
+
+	def train_test_split(self):
+		labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+
+		idx_train = labels.sample(frac=self.config.train_test_ratio).index
+		d_train = xrv.datasets.SubsetDataset(self.dataset, idxs=idx_train)
+
+		idx_test = labels.drop(idx_train).index
+		d_test = xrv.datasets.SubsetDataset(self.dataset, idxs=idx_test)
+
+		return d_train, d_test
+
+	def _selecting_non_null_samples(self):
+		"""  Selecting non-null samples for impacted pathologies  """
+
+		labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+
+		for parent in self.nodeData.nodes.TAXONOMY:
+
+			# Extracting the samples with a non-null value for the parent truth label
+			labels  = labels[ ~labels[parent].isna() ]
+			self.dataset = xrv.datasets.SubsetDataset(self.dataset, idxs=labels.index)
+			labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+
+			# Extracting the samples, where for each parent, at least one of their children has a non-null truth label
+			labels  = labels[ (~labels[ self.nodeData.nodes.TAXONOMY[parent] ].isna()).sum(axis=1) > 0 ]
+			self.dataset = xrv.datasets.SubsetDataset(self.dataset, idxs=labels.index)
+
 	def load(self):
 
-		def _update_empty_parent_class_based_on_its_children_classes():
-
-			labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
-
-			for parent, children in self.nodeData.nodes.TAXONOMY.items():
-
-				# Checking if the parent class existed in the original pathologies in the dataset. Will only replace its values if all its labels are NaN
-				if labels[parent].value_counts().values.shape[0] == 0:
-
-					print(f"Parent class: {parent} is not in the dataset. replacing its true values according to its children presence.")
-
-					# Initializing the parent label to 0
-					labels[parent] = 0
-
-					# If at-least one of the children has a label of 1, then the parent label is 1
-					labels[parent][ labels[children].sum(axis=1) > 0 ] = 1
-
-			self.dataset.labels = labels.values
-
-		def train_test_split():
-			labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
-
-			idx_train = labels.sample(frac=self.config.train_test_ratio).index
-			d_train = xrv.datasets.SubsetDataset(self.dataset, idxs=idx_train)
-
-			idx_test = labels.drop(idx_train).index
-			d_test = xrv.datasets.SubsetDataset(self.dataset, idxs=idx_test)
-
-			return d_train, d_test
-
-		def selecting_non_null_samples():
-			"""  Selecting non-null samples for impacted pathologies  """
-
-			dataset = self.dataset
-			columns = self.dataset.pathologies
-			labels  = pd.DataFrame( dataset.labels , columns=columns)
-
-			# Looping through all parent classes in the taxonomy
-			for parent in self.nodeData.nodes.TAXONOMY:
-
-				# Extracting the samples with a non-null value for the parent truth label
-				labels  = labels[ ~labels[parent].isna() ]
-				dataset = xrv.datasets.SubsetDataset(dataset, idxs=labels.index)
-				labels  = pd.DataFrame( dataset.labels , columns=columns)
-
-				# Extracting the samples, where for each parent, at least one of their children has a non-null truth label
-				labels  = labels[ (~labels[ self.nodeData.nodes.TAXONOMY[parent] ].isna()).sum(axis=1) > 0 ]
-				dataset = xrv.datasets.SubsetDataset(dataset, idxs=labels.index)
-				labels  = pd.DataFrame( dataset.labels , columns=columns)
-
-			self.dataset = dataset
-
 		# Loading the data using torchxrayvision package
-		self.dataset = self.load_raw_database()
+		self.load_raw_database()
 
 		# Relabeling it with respect to the model pathologies
 		self.relabel_raw_database()
 
 		# Updating the empty parent labels with the child labels
 		if self.config.datasetName in [DatasetNames.PC , DatasetNames.NIH]:
-			_update_empty_parent_class_based_on_its_children_classes()
+			self.update_empty_parent_class_based_on_its_children_classes()
 
 		# Selecting non-null samples for impacted pathologies
-		if self.config.NotNull_Samples:
-			selecting_non_null_samples()
+		self._selecting_non_null_samples()
 
 		#separate train & test
-		dataset_train, dataset_test = train_test_split()
+		dataset_train, dataset_test = self.train_test_split()
 
 		# Creating the data_loader
-		data_loader_args = {"batch_size" : self.config.batch_size,
-							"shuffle"    : self.config.shuffle,
-							"num_workers": self.config.num_workers,
-							"pin_memory" : USE_CUDA		}
-		data_loader_train = torch.utils.data.DataLoader(dataset_train, **data_loader_args)
-		data_loader_test  = torch.utils.data.DataLoader(dataset_test , **data_loader_args )
+		data_loader_args = {key: getattr(self.config, key) for key in ['batch_size', 'shuffle', 'num_workers']}
+		data_loader_train = torch.utils.data.DataLoader(dataset_train, pin_memory=USE_CUDA , **data_loader_args)
+		data_loader_test  = torch.utils.data.DataLoader(dataset_test , pin_memory=USE_CUDA , **data_loader_args )
 
 		self.train = Data(dataset=dataset_train, data_loader=data_loader_train)
 		self.test  = Data(dataset=dataset_test , data_loader=data_loader_test )
@@ -253,4 +440,4 @@ class LoadChestXrayDatasets:
 
 	@property
 	def available_datasets(self):
-		return [DatasetNames.CheXPERT, DatasetNames.NIH, DatasetNames.PC]
+		return [DatasetNames.CHEXPERT, DatasetNames.NIH, DatasetNames.PC]

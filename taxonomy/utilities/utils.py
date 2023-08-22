@@ -4,7 +4,6 @@ import contextlib
 import multiprocessing
 import pathlib
 import pickle
-# import resource
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
@@ -22,10 +21,11 @@ from scipy import stats
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.data import Data, Findings, Hierarchy, LoadChestXrayDatasets, Metrics
+from taxonomy.utilities.data import Data, LoadChestXrayDatasets, Metrics, NodeData
 from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, TechniqueNames, \
-	NodeData, reading_user_input_arguments, ThreshTechList
+from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, TechniqueNames, ThreshTechList
+from taxonomy.utilities.settings import get_settings
+
 
 USE_CUDA = torch.cuda.is_available()
 
@@ -63,6 +63,7 @@ class SaveFile:
 
 		elif self.path.suffix == '.xlsx':
 			file.to_excel(self.path, index=index)
+
 
 class SaveFigure:
 
@@ -229,11 +230,9 @@ class CalculateNewFindings:
 		self.save_path_full   = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{methodName}/findings_new_{data.data_mode}.pkl'
 
 	@staticmethod
-	def get_hierarchy_penalty_for_node(G, node, thresh_technique, parent_condition_mode, methodName, a, b=0) -> np.ndarray:
-		""" Return:   hierarchy_penalty: Array(index=sample_indices) """
+	def get_hierarchy_penalty_for_node(graph, node, thresh_technique, parent_condition_mode, methodName, a, b=0) -> np.ndarray:
 
 		def calculate_H(parent_node: str) -> np.ndarray:
-			""" Return:   hierarchy_penalty: Array(index=sample_indices) """
 
 			def calculate_raw_weight(pdata) -> pd.Series:
 				if   methodName is TechniqueNames.LOGIT_BASED: return pd.Series(a * pdata.data.logit.to_numpy(), index=pdata.data.index)
@@ -256,7 +255,7 @@ class CalculateNewFindings:
 				return hierarchy_penalty.to_numpy()
 
 			# Getting the parent data
-			pdata = Hierarchy.get_findings_for_node(G=G, node=parent_node, experimentStage=ExperimentStageNames.ORIGINAL, thresh_technique=thresh_technique)
+			pdata = Hierarchy.get_findings_for_node(graph=graph, node=parent_node, experimentStage=ExperimentStageNames.ORIGINAL, thresh_technique=thresh_technique)
 
 			# Calculating the initial hierarchy_penalty based on "a" , "b" and "methodName"
 			hierarchy_penalty = calculate_raw_weight(pdata)
@@ -266,7 +265,7 @@ class CalculateNewFindings:
 
 		def set_H_to_be_ineffective() -> np.ndarray:
 
-			ndata = Hierarchy.get_findings_for_node(G=G, node=node, thresh_technique=thresh_technique, experimentStage=ExperimentStageNames.ORIGINAL)
+			ndata = Hierarchy.get_findings_for_node(graph=graph, node=node, thresh_technique=thresh_technique, experimentStage=ExperimentStageNames.ORIGINAL)
 
 			if   methodName is TechniqueNames.LOGIT_BASED: return np.zeros(len(ndata.data.index))
 			elif methodName is TechniqueNames.LOSS_BASED:  return np.ones(len(ndata.data.index))
@@ -274,7 +273,7 @@ class CalculateNewFindings:
 			raise ValueError(' methodName is not supproted')
 
 		# Get the parent node of the current node. We assume that each node can only have one parent to aviod complications in theoretical calculations.
-		parent_node = Hierarchy.get_parent_node(G=G, node=node)
+		parent_node = Hierarchy.get_parent_node(graph=graph, node=node)
 
 		# Calculating the hierarchy_penalty for the current node
 		return calculate_H(parent_node) if parent_node else set_H_to_be_ineffective()
@@ -330,7 +329,7 @@ class CalculateNewFindings:
 	def calculate_per_node(node: str, data: Data, config: argparse.Namespace, hyperparameters: Dict[ThreshTechList, pd.DataFrame], thresh_technique: ThreshTechList) -> Data:
 
 		x = thresh_technique
-		G = data.Hierarchy_cls.G
+		graph = data.Hierarchy_cls.graph
 
 		def initialization():
 			# Adding the truth values
@@ -348,10 +347,10 @@ class CalculateNewFindings:
 
 		# Getting the hierarchy_penalty for the node
 		a, b = hyperparameters[x].loc['a', node], hyperparameters[x].loc['b',node]
-		data.NEW.hierarchy_penalty[x, node] = CalculateNewFindings.get_hierarchy_penalty_for_node( G=G, a=a, b=b, node=node, thresh_technique=x, parent_condition_mode=config.parent_condition_mode, methodName=config.methodName )
+		data.NEW.hierarchy_penalty[x, node] = CalculateNewFindings.get_hierarchy_penalty_for_node( graph=graph, a=a, b=b, node=node, thresh_technique=x, parent_condition_mode=config.parent_condition_mode, methodName=config.methodName )
 
 		# Getting node data
-		ndata: NodeData = Hierarchy.get_findings_for_node(G=G, node=node, thresh_technique=x, experimentStage=ExperimentStageNames.ORIGINAL)
+		ndata: NodeData = Hierarchy.get_findings_for_node(graph=graph, node=node, thresh_technique=x, experimentStage=ExperimentStageNames.ORIGINAL)
 
 		data.NEW.pred[x, node], data.NEW.logit[x, node], data.NEW.loss[x, node] = CalculateNewFindings.do_approach( config=config, w=data.NEW.hierarchy_penalty[x][node], ndata=ndata )
 
@@ -793,7 +792,7 @@ class TaxonomyXRV:
 
 		data = self.train if data_mode == DataModes.TRAIN else self.test
 
-		N = data.Hierarchy_cls.G.nodes
+		N = data.Hierarchy_cls.graph.nodes
 		parent_child = data.Hierarchy_cls.parent_dict[node] + [node]
 
 		df = pd.DataFrame(index=N[node][ ExperimentStageNames.ORIGINAL]['data'].index, columns=pd.MultiIndex.from_product([parent_child, ['truth' , 'pred' , 'loss'], ExperimentStageNames.members()]))
@@ -903,7 +902,7 @@ class TaxonomyXRV:
 	def run_full_experiment(cls, methodName=TechniqueNames.LOSS_BASED, seed=10, **kwargs):
 
 		# Getting the user arguments
-		config = reading_user_input_arguments(jupyter=True, methodName=methodName.name, **kwargs)
+		config = get_settings(jupyter=True, methodName=methodName.name, **kwargs)
 
 		# Initializing the class
 		FE = cls(config=config, seed=seed)
@@ -967,7 +966,7 @@ class TaxonomyXRV:
 	@classmethod
 	def get_all_metrics(cls, datasets_list=DatasetNames.members(), data_mode=DataModes.TEST, thresh_technique=ThreshTechList.DEFAULT, jupyter=True, **kwargs):  # type: (List[DatasetNames], DataModes, ThreshTechList, bool, dict) -> MetricsAllTechniques
 
-		config = reading_user_input_arguments(jupyter=jupyter, **kwargs)
+		config = get_settings(jupyter=jupyter, **kwargs)
 		save_path = pathlib.Path(f'tables/metrics_all_datasets/{thresh_technique}')
 
 		def apply_to_approach(methodName: TechniqueNames) -> Metrics:
@@ -1055,7 +1054,7 @@ class TaxonomyXRV:
 	@staticmethod
 	def check(check_what='labels', jupyter=True, **kwargs):
 
-		config = reading_user_input_arguments(jupyter=jupyter)
+		config = get_settings(jupyter=jupyter)
 
 		if check_what == 'config':
 			return config

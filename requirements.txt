@@ -10,11 +10,10 @@ networkx~=3.1
 hyperopt~=0.2.7
 seaborn~=0.12.2
 scipy~=1.11.1
-setuptools~=68.0.0
-taxonomy~=0.0.0
-plotly~=5.15.0
 torch~=2.0.1
-resource~=0.2.1
+plotly
 pingouin~=0.5.3
 requests~=2.31.0
 imageio~=2.31.1
+umap~=0.1.1
+pydantic~=1.8.2
