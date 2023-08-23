@@ -1,11 +1,12 @@
 import argparse
 import json
-import os
 import pathlib
 import sys
 
 import pydantic
-from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ModelWeightNames, ParentMetricToUseNames, SimulationOptions, TechniqueNames
+
+from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ModelWeightNames, \
+	ParentMetricToUseNames, SimulationOptions, TechniqueNames
 
 
 class DatasetSettings(pydantic.BaseModel):
@@ -27,8 +28,14 @@ class TrainingSettings(pydantic.BaseModel):
 	silent            : bool = True
 
 class ModelSettings(pydantic.BaseModel):
-	name                 : ModelWeightNames = ModelWeightNames.ALL_224
+	name           : ModelWeightNames = ModelWeightNames.ALL_224
 	chexpert_weights_path: pathlib.Path     = pathlib.Path("./pre_trained_models/chestxray/chexpert_baseline_model_weight.zip")
+
+	@property
+	def full_name(self) -> str:
+		return self.name.full_name
+
+
 
 class SimulationSettings(pydantic.BaseModel):
 	findings_original: SimulationOptions = SimulationOptions.RUN_SIMULATION
@@ -59,7 +66,7 @@ class Settings(pydantic.BaseSettings):
 	output                     : OutputSettings
 
 	class Config:
-		use_enum_values      = True
+		use_enum_values      = False
 		case_sensitive       = False
 		str_strip_whitespace = True
 

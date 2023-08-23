@@ -21,7 +21,7 @@ def members(cls):
 @members
 class ExperimentStageNames(enum.Enum):
 	ORIGINAL = 'original'
-	NEW      = 'updated'
+	NEW      = 'new'
 
 
 @members
@@ -60,16 +60,22 @@ class TechniqueNames(enum.Enum):
 
 @members
 class ModelWeightNames(enum.Enum):
-	PC                    = 'densenet121-res224-pc'
-	NIH                   = 'densenet121-res224-nih'
-	CHEXPERT              = 'densenet121-res224-chex'
-	RSNA                  = 'densenet121-res224-rsna'
-	MIMIC_NB              = 'densenet121-res224-mimic_nb'
-	MIMIC_CH              = 'densenet121-res224-mimic_ch'
-	ALL_224               = 'densenet121-res224-all'
-	ALL_512               = 'resnet50-res512-all'
-	BASELINE_JFHEALTHCARE = 'baseline_jfhealthcare'
-	BASELINE_CHEX         = 'baseline_CheX'
+	PC                    = ("pc"           , 'densenet121-res224-pc')
+	NIH                   = ("nih"          , 'densenet121-res224-nih')
+	CHEXPERT              = ("chex"         , 'densenet121-res224-chex')
+	RSNA                  = ("rsna"         , 'densenet121-res224-rsna')
+	MIMIC_NB              = ("mimic_nb"     , 'densenet121-res224-mimic_nb')
+	MIMIC_CH              = ("mimic_ch"     , 'densenet121-res224-mimic_ch')
+	ALL_224               = ("all_224"      , 'densenet121-res224-all')
+	ALL_512               = ("all_512"      , 'resnet50-res512-all')
+	BASELINE_JFHEALTHCARE = ("baseline_jf"  , 'baseline_jfhealthcare')
+	BASELINE_CHEX         = ("baseline_chex", 'baseline_CheX')
+
+	def __new__(cls, short_name, full_name):
+		obj = object.__new__(cls)
+		obj._value_ = short_name
+		obj.full_name = full_name
+		return obj
 
 
 @members
@@ -82,27 +88,26 @@ class EvaluationMetricNames(enum.Enum):
 
 @members
 class FindingNames(enum.Enum):
-	GROUND_TRUTH = 'ground_truth'
-	LOSS_VALUES  = 'loss_values'
-	LOGIT_VALUES = 'logit_values'
-	PRED_PROBS   = 'pred_probs'
+	TRUTH = 'truth'
+	LOSS  = 'loss_values'
+	LOGIT = 'logit_values'
+	PRED  = 'pred_probs'
 
 
 @members
 class HyperparameterNames(enum.Enum):
-	A = 'a'
-	B = 'b'
+	MULTIPLIER = 'hyper_param_multiplier'
+	ADDITIVE   = 'hyper_param_additive'
 
 
 @members
 class ParentMetricToUseNames( enum.Enum ):
-	TRUTH     : str = 'truth'
-	PREDICTED : str = 'predicted'
+	TRUTH: str = 'truth'
+	PRED : str = 'pred_probs'
 
 
 @members
 class SimulationOptions(enum.Enum):
-	LOAD_LOCAL_FINDINGS = 'load_local_findings'
-	LOAD_FROM_MLFLOW	= 'load_from_mlflow'
-	RUN_SIMULATION		= 'run_simulation'
+	LOAD_FROM_LOCAL = 'load_from_local'
+	RUN_SIMULATION  = 'run_simulation'
 

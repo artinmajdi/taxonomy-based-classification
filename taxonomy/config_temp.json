@@ -1,0 +1,8 @@
+{
+    "simulation": {
+        "findings_original": "load_local_findings",
+        "findings_new"     : "load_local_findings",
+        "hyperparameters"  : "load_local_findings",
+        "metrics"          : "load_local_findings"
+    }
+}
