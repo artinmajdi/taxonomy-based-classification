@@ -11,7 +11,7 @@ import torchxrayvision as xrv
 
 class RaceModel(nn.Module):
     """This model is from the work below and is trained to predict the
-    patient race from a chest X-ray. Public data from the MIMIC dataset is used
+    patient race from a chest X-ray. Public data from the MIMIC dataset_full is used
     to train this model. The native resolution of the model is 320x320. Images
     are scaled automatically.
 

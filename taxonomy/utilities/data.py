@@ -1,9 +1,9 @@
 import argparse
 import itertools
 import pathlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, InitVar
 from functools import cached_property
-from typing import Union
+from typing import Optional, Union
 
 import networkx as nx
 import numpy as np
@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader as torch_DataLoader
 
 import torchxrayvision as xrv
 from taxonomy.utilities.params import DataModes, DatasetNames, ExperimentStageNames, HyperparameterNames, \
-	TechniqueNames, ThreshTechList
+	ThreshTechList
+from taxonomy.utilities.settings import Settings
 
 USE_CUDA = torch.cuda.is_available()
 
@@ -171,8 +172,8 @@ class Labels:
 		self.LABEL_SET = pd.DataFrame(self.LABEL_SET, columns=self.CLASSES)
 
 		if self.LABEL_SET.size > 0:
-			self.nodes.NON_NULL    = self.LABEL_SET.columns[self.LABEL_SET.count() > 0].to_list()
-			self.nodes.IMPACTED    = [x for x in self.nodes.NON_NULL if x in self.nodes.EXIST_IN_TAXONOMY]
+			self.nodes.NON_NULL = self.LABEL_SET.columns[self.LABEL_SET.count() > 0].to_list()
+			self.nodes.IMPACTED = [x for x in self.nodes.NON_NULL if x in self.nodes.EXIST_IN_TAXONOMY]
 
 
 @dataclass
@@ -181,39 +182,53 @@ class Data:
 	data_loader: torch_DataLoader
 	labels     : Labels    = field(default_factory = lambda: None)
 	dataMode   : DataModes = field(default_factory = lambda: None)
+	nodeData   : NodeData  = field(default_factory = lambda: None)
 
 	def __post_init__(self):
-		self.labels = Labels(LABEL_SET=self.dataset.labels, CLASSES=self.dataset.pathologies)
+		self.labels   = Labels(LABEL_SET=self.dataset.labels, CLASSES=self.dataset.pathologies)
+		self.nodeData = NodeData(set(self.dataset.pathologies))
 
 
 @dataclass
 class Metrics:
-	ACC: pd.DataFrame = field(default_factory = lambda: None)
-	AUC: pd.DataFrame = field(default_factory = lambda: None)
-	F1 : pd.DataFrame = field(default_factory = lambda: None)
-	THRESHOLD: dict[ThreshTechList, pd.DataFrame] = field(default_factory = lambda: None)
+	pathologies: InitVar[set[str]]
+	ACC        : Optional[pd.DataFrame] = None
+	AUC        : Optional[pd.DataFrame] = None
+	F1         : Optional[pd.DataFrame] = None
+	THRESHOLD  : Optional[pd.DataFrame] = None
+
+	def __post_init__(self, pathologies: set[str]):
+		self.ACC       = pd.DataFrame(columns = list(pathologies), dtype = float)
+		self.AUC       = pd.DataFrame(columns = list(pathologies), dtype = float)
+		self.F1        = pd.DataFrame(columns = list(pathologies), dtype = float)
+		self.THRESHOLD = pd.DataFrame(columns = list(pathologies), dtype = float)
+
+
+@dataclass
+class ModelFindings:
+	truth_values: pd.DataFrame = field( default_factory = lambda: None )
+	loss_values : pd.DataFrame = field(default_factory  = lambda: None)
+	logit_values: pd.DataFrame = field(default_factory  = lambda: None)
+	pred_values : pd.DataFrame = field(default_factory  = lambda: None)
 
 
 @dataclass
 class Findings:
-	data           : Data                 = field(default_factory = lambda: None)
-	ground_truth   : pd.DataFrame         = field(default_factory = lambda: None)
-	loss_values    : pd.DataFrame         = field(default_factory = lambda: None)
-	logit_values   : pd.DataFrame         = field(default_factory = lambda: None)
-	pred_probs     : pd.DataFrame         = field(default_factory = lambda: None)
-	metrics        : Metrics              = field(default_factory = lambda: None)
-	nodeData	   : NodeData             = field(default_factory = lambda: None)
-	techniqueName  : TechniqueNames       = field(default_factory = lambda: None)
-	experimentStage: ExperimentStageNames = field(default_factory = lambda: None)
+	config         : Settings
+	data           : Data
+	model          : torch.nn.Module
+	modelFindings  : ModelFindings        = field(default_factory = lambda: ModelFindings())
+	metrics        : Metrics              = field(default_factory = lambda: Metrics())
+	experimentStage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
 
 
 @dataclass
 class LoadChestXrayDatasets:
-	config  : argparse.Namespace   = field(default_factory = lambda: None)
-	dataset : xrv.datasets.Dataset = field(default_factory = lambda: None)
-	train   : Data                 = field(default_factory = lambda: None)
-	test    : Data                 = field(default_factory = lambda: None)
-	nodeData: NodeData             = field(default_factory = lambda: None)
+	config      : argparse.Namespace   = field(default_factory  = lambda: None)
+	dataset_full: xrv.datasets.Dataset = field( default_factory = lambda: None)
+	train       : Data                 = field(default_factory  = lambda: None)
+	test        : Data                 = field(default_factory  = lambda: None)
+	nodeData    : NodeData             = field(default_factory  = lambda: None)
 
 	def load_raw_database(self):
 		"""
@@ -227,7 +242,7 @@ class LoadChestXrayDatasets:
 			# CheXpert: A Large Chest Radiograph Dataset with Uncertainty Labels and Expert Comparison. https://arxiv.org/abs/1901.07031
 				Dataset website here: https://stanfordmlgroup.github.io/competitions/chexpert/
 
-			# NIH ChestX-ray8 dataset. https://arxiv.org/abs/1705.02315
+			# NIH ChestX-ray8 dataset_full. https://arxiv.org/abs/1705.02315
 				Dataset release website:
 				https://www.nih.gov/news-events/news-releases/nih-clinical-center-provides-one-largest-publicly-available-chest-x-ray-datasets-scientific-community
 
@@ -237,21 +252,21 @@ class LoadChestXrayDatasets:
 				Download resized (224x224) images here:
 				https://academictorrents.com/details/e615d3aebce373f1dc8bd9d11064da55bdadede0
 
-			# PadChest: A large chest thresh_technique-ray image dataset with multi-label annotated reports. https://arxiv.org/abs/1901.07441
+			# PadChest: A large chest thresh_technique-ray image dataset_full with multi-label annotated reports. https://arxiv.org/abs/1901.07441
 				Note that images with null labels (as opposed to normal), and images that cannot
 				be properly loaded (listed as 'missing' in the code) are excluded, which makes
 				the total number of available images slightly less than the total number of image
 				files.
 
-				PadChest: A large chest thresh_technique-ray image dataset with multi-label annotated reports.
+				PadChest: A large chest thresh_technique-ray image dataset_full with multi-label annotated reports.
 				Aurelia Bustos, Antonio Pertusa, Jose-Maria Salinas, and Maria de la Iglesia-Vayá.
 				arXiv preprint, 2019. https://arxiv.org/abs/1901.07441
 				Dataset website: https://bimcv.cipf.es/bimcv-projects/padchest/
 				Download full size images here: https://academictorrents.com/details/dec12db21d57e158f78621f06dcbe78248d14850
 				Download resized (224x224) images here (recropped):	https://academictorrents.com/details/96ebb4f92b85929eadfb16761f310a6d04105797
 
-			# VinDr-CXR: An open dataset of chest X-rays with radiologist's annotations. https://arxiv.org/abs/2012.15029
-				VinBrain Dataset. Nguyen et al., VinDr-CXR: An open dataset of chest X-rays with radiologist's annotations
+			# VinDr-CXR: An open dataset_full of chest X-rays with radiologist's annotations. https://arxiv.org/abs/2012.15029
+				VinBrain Dataset. Nguyen et al., VinDr-CXR: An open dataset_full of chest X-rays with radiologist's annotations
 				https://arxiv.org/abs/2012.15029
 				https://www.kaggle.com/c/vinbigdata-chest-xray-abnormalities-detection
 
@@ -270,7 +285,7 @@ class LoadChestXrayDatasets:
 				Download images: https://academictorrents.com/details/5a3a439df24931f410fac269b87b050203d9467d
 
 			# NIH_Google Dataset
-				A relabeling of a subset of images from the NIH dataset.  The data tables should
+				A relabeling of a subset of images from the NIH dataset_full.  The data tables should
 				be applied against an NIH download.  A test and validation split are provided in the
 				original.  They are combined here, but one or the other can be used by providing
 				the original csv to the csvpath argument.
@@ -340,31 +355,34 @@ class LoadChestXrayDatasets:
 				DatasetNames.NIH_Google: xrv.datasets.NIH_Google_Dataset
 				}
 
-		self.dataset = dataset_config.get(self.config.datasetName)(**params_config.get(self.config.datasetName))
+		self.dataset_full = dataset_config.get( self.config.datasetName )( **params_config.get( self.config.datasetName ) )
+		self.nodeData     = NodeData(set(self.dataset_full.pathologies))
 
 	def relabel_raw_database(self):
 		from taxonomy.utilities.model import LoadModelXRV
 
 		# Adding the PatientID if it doesn't exist
-		# if "patientid" not in self.dataset.csv:
-		# 	self.dataset.csv["patientid"] = [ f"{self.dataset.__class__.__name__}-{i}" for i in range(len(self.dataset)) ]
+		# if "patientid" not in self.dataset_full.csv:
+		# 	self.dataset_full.csv["patientid"] = [ f"{self.dataset_full.__class__.__name__}-{i}"
+		# 	for i in range(len(self.dataset_full)) ]
 
-		# Filtering the dataset
-		# self.dataset.csv = self.dataset.csv[self.dataset.csv['Frontal/Lateral'] == 'Frontal'].reset_index(drop=False)
+		# Filtering the dataset_full
+		# self.dataset_full.csv = self.dataset_full.csv[self.dataset_full.csv['Frontal/Lateral'] == 'Frontal'].reset_index(drop=False)
 
 		# Aligning labels to have the same order as the pathologies' argument.
-		xrv.datasets.relabel_dataset( pathologies=LoadModelXRV.model_classes(self.config), dataset=self.dataset, silent=self.config.silent)
+		xrv.datasets.relabel_dataset( pathologies=LoadModelXRV.model_classes(self.config), dataset=self.dataset_full, silent=self.config.silent )
 
 	def update_empty_parent_class_based_on_its_children_classes(self):
 
-		labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+		labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
 
 		for parent, children in self.nodeData.nodes.TAXONOMY.items():
 
-			# Checking if the parent class existed in the original pathologies in the dataset. Will only replace its values if all its labels are NaN
+			# Checking if the parent class existed in the original pathologies in the dataset_full.
+			# Will only replace its values if all its labels are NaN
 			if labels[parent].value_counts().values.shape[0] == 0:
 
-				print(f"Parent class: {parent} is not in the dataset. replacing its true values according to its children presence.")
+				print(f"Parent class: {parent} is not in the dataset_full. replacing its true values according to its children presence.")
 
 				# Initializing the parent label to 0
 				labels[parent] = 0
@@ -372,34 +390,34 @@ class LoadChestXrayDatasets:
 				# If at-least one of the children has a label of 1, then the parent label is 1
 				labels[parent][ labels[children].sum(axis=1) > 0 ] = 1
 
-		self.dataset.labels = labels.values
+		self.dataset_full.labels = labels.values
 
 	def train_test_split(self):
-		labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+		labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
 
 		idx_train = labels.sample(frac=self.config.train_test_ratio).index
-		d_train = xrv.datasets.SubsetDataset(self.dataset, idxs=idx_train)
+		d_train = xrv.datasets.SubsetDataset( self.dataset_full, idxs=idx_train )
 
 		idx_test = labels.drop(idx_train).index
-		d_test = xrv.datasets.SubsetDataset(self.dataset, idxs=idx_test)
+		d_test = xrv.datasets.SubsetDataset( self.dataset_full, idxs=idx_test )
 
 		return d_train, d_test
 
 	def _selecting_non_null_samples(self):
 		"""  Selecting non-null samples for impacted pathologies  """
 
-		labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+		labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
 
 		for parent in self.nodeData.nodes.TAXONOMY:
 
 			# Extracting the samples with a non-null value for the parent truth label
 			labels  = labels[ ~labels[parent].isna() ]
-			self.dataset = xrv.datasets.SubsetDataset(self.dataset, idxs=labels.index)
-			labels  = pd.DataFrame( self.dataset.labels , columns=self.dataset.pathologies)
+			self.dataset_full = xrv.datasets.SubsetDataset( self.dataset_full, idxs=labels.index )
+			labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
 
 			# Extracting the samples, where for each parent, at least one of their children has a non-null truth label
 			labels  = labels[ (~labels[ self.nodeData.nodes.TAXONOMY[parent] ].isna()).sum(axis=1) > 0 ]
-			self.dataset = xrv.datasets.SubsetDataset(self.dataset, idxs=labels.index)
+			self.dataset_full = xrv.datasets.SubsetDataset( self.dataset_full, idxs=labels.index )
 
 	def load(self):
 
@@ -424,8 +442,8 @@ class LoadChestXrayDatasets:
 		data_loader_train = torch.utils.data.DataLoader(dataset_train, pin_memory=USE_CUDA , **data_loader_args)
 		data_loader_test  = torch.utils.data.DataLoader(dataset_test , pin_memory=USE_CUDA , **data_loader_args )
 
-		self.train = Data(dataset=dataset_train, data_loader=data_loader_train)
-		self.test  = Data(dataset=dataset_test , data_loader=data_loader_test )
+		self.train = Data(dataset=dataset_train, data_loader=data_loader_train, dataMode=DataModes.TRAIN)
+		self.test  = Data(dataset=dataset_test , data_loader=data_loader_test , dataMode=DataModes.TEST )
 
 	@property
 	def xrv_default_pathologies(self):

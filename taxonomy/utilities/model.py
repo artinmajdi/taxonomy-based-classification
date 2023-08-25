@@ -14,6 +14,12 @@ from taxonomy.utilities.params import DataModes, ModelWeightNames
 
 USE_CUDA = torch.cuda.is_available()
 
+@dataclass
+class LossFunctionOptions:
+	binary_crossentropy: torch.nn.BCELoss(reduction='none')
+	bce                 : torch.nn.BCELoss(reduction='none')
+	bce_with_logits     : torch.nn.BCEWithLogitsLoss(reduction='none')
+
 
 def extract_feature_maps(config: argparse.Namespace, data_mode: DataModes=DataModes.TEST) -> Tuple[np.ndarray, pd.DataFrame, list]:
 

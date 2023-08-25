@@ -9,7 +9,7 @@ import torchxrayvision as xrv
 
 
 class AgeModel(nn.Module):
-    """This model predicts age. It is trained on the NIH dataset. The
+    """This model predicts age. It is trained on the NIH dataset_full. The
     publication reports a mean absolute error (MAE) between the estimated age
     and chronological age of 3.67 years.
 

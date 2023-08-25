@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import enum
 
+import torch.nn
+
 
 def members(cls):
 	
@@ -77,6 +79,19 @@ class ModelWeightNames(enum.Enum):
 		obj.full_name = full_name
 		return obj
 
+@members
+class LossFunctionOptions(enum.Enum):
+	BCE = 'binary_cross_entropy'
+	MSE = 'mean_squared_error'
+	CE  = 'cross_entropy'
+
+	def __init__(self, value):
+		loss_dict = {
+			'binary_cross_entropy': torch.nn.BCELoss(reduction = 'none'),
+			'mean_squared_error'  : torch.nn.MSELoss(reduction = 'none'),
+			'cross_entropy'       : torch.nn.CrossEntropyLoss(reduction = 'none')
+				}
+		self.function = loss_dict.get(value)
 
 @members
 class EvaluationMetricNames(enum.Enum):
@@ -88,10 +103,10 @@ class EvaluationMetricNames(enum.Enum):
 
 @members
 class FindingNames(enum.Enum):
-	TRUTH = 'truth'
+	TRUTH = 'ground_truth'
 	LOSS  = 'loss_values'
 	LOGIT = 'logit_values'
-	PRED  = 'pred_probs'
+	PRED  = 'predicted_probabilities'
 
 
 @members
@@ -102,12 +117,13 @@ class HyperparameterNames(enum.Enum):
 
 @members
 class ParentMetricToUseNames( enum.Enum ):
-	TRUTH: str = 'truth'
-	PRED : str = 'pred_probs'
+	TRUTH: str = 'ground_truth'
+	PRED : str = 'predicted_probabilities'
 
 
 @members
 class SimulationOptions(enum.Enum):
 	LOAD_FROM_LOCAL = 'load_from_local'
 	RUN_SIMULATION  = 'run_simulation'
+
 

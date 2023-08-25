@@ -7,15 +7,61 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import seaborn as sns
+import sklearn
 import umap
 from matplotlib import pyplot as plt
 
-from taxonomy.utilities.data import Labels, LoadChestXrayDatasets
+from taxonomy.utilities.data import Labels, LoadChestXrayDatasets, Metrics
 from taxonomy.utilities.model import extract_feature_maps
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import get_settings
 from taxonomy.utilities.utils import LoadSaveFindings, TaxonomyXRV
+
+def calculating_threshold_and_metrics(DATA) -> Metrics:
+
+	metrics = Metrics()
+
+	def calculating_threshold_and_metrics_per_node(node: str, findings: Findings, thresh_technique: ThreshTechList) -> Findings:
+
+		def calculating_optimal_thresholds(y, yhat):
+
+			if thresh_technique == ThreshTechList.DEFAULT:
+				metrics.THRESHOLD = 0.5
+
+			if thresh_technique == ThreshTechList.ROC:
+				fpr, tpr, th = sklearn.metrics.roc_curve(y, yhat)
+				metrics.THRESHOLD = th[np.argmax( tpr - fpr )]
+
+			if thresh_technique == ThreshTechList.PRECISION_RECALL:
+				ppv, recall, th = sklearn.metrics.precision_recall_curve(y, yhat)
+				f_score = 2 * (ppv * recall) / (ppv + recall)
+				metrics.THRESHOLD = th[np.argmax( f_score )]
+
+		def calculating_metrics(y, yhat, x):
+			metrics.AUC = sklearn.metrics.roc_auc_score(y, yhat)
+			metrics.ACC = sklearn.metrics.accuracy_score(y, yhat >= findings.metrics[x, node]['Threshold'])
+			metrics.F1  = sklearn.metrics.f1_score      (y, yhat >= findings.metrics[x, node]['Threshold'])
+
+		# Finding the indices where the truth is not nan
+		non_null = ~np.isnan( findings.truth[node] )
+		truth_notnull = findings.truth[node][non_null].to_numpy()
+
+		if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
+			# for thresh_technique in ThreshTechList:
+			pred = findings.pred[node] if findings.experiment_stage == ExperimentStageNames.ORIGINAL else findings.pred[thresh_technique,node]
+			pred_notnull = pred[non_null].to_numpy()
+
+			calculating_optimal_thresholds( y = truth_notnull, yhat = pred_notnull)
+			calculating_metrics(y = truth_notnull, yhat = pred_notnull , x = thresh_technique)
+
+		return findings
+
+	for x in ThreshTechList:
+		for node in DATA.pathologies:
+			DATA = calculating_threshold_and_metrics_per_node(node=node, findings=DATA, thresh_technique=x)
+
+	return DATA
 
 
 class Tables:
@@ -40,7 +86,7 @@ class Tables:
 
 		def get():
 			columns = pd.MultiIndex.from_product([DatasetNames.members(), TechniqueNames.members()],
-			                                     names=['dataset', 'methodName'])
+			                                     names=['dataset_full', 'methodName'])
 			AUC = pd.DataFrame(columns = columns)
 			F1  = pd.DataFrame(columns = columns)
 			ACC = pd.DataFrame(columns = columns)
@@ -106,17 +152,17 @@ class Tables:
 			df2 = pd.DataFrame(columns=['PA', 'AP'])
 			for views in ['PA', 'AP']:
 
-				# Getting the dataset for a specific view
+				# Getting the dataset_full for a specific view
 				LD = Tables.get_dataset_unfiltered( datasetName=dname, views=views )
-				df2[views] = LD.dataset.labels.sum(axis=0).astype(int).replace(0, '')
+				df2[views] = LD.dataset_full.labels.sum( axis=0 ).astype( int ).replace( 0, '' )
 
 				# Adding the Total row
-				df2.loc['Total', views] = LD.dataset.labels.shape[0]
+				df2.loc['Total', views] = LD.dataset_full.labels.shape[0]
 
 			return df2.apply(combine_PA_AP, axis=1)
 
 		cln_list = [ExperimentStageNames.members(), DatasetNames.members()]
-		columns = pd.MultiIndex.from_product(cln_list, names=['mode', 'dataset'])
+		columns = pd.MultiIndex.from_product(cln_list, names=['mode', 'dataset_full'])
 		df = pd.DataFrame(columns=columns)
 
 		for mode, dname in itertools.product(*cln_list):
@@ -173,7 +219,7 @@ class Visualize:
 				                s=20)
 				axes[i].set_title(node)
 
-			plt.suptitle(f"{method} Visualization for {config.datasetName} dataset")
+			plt.suptitle(f"{method} Visualization for {config.datasetName} dataset_full")
 
 			# Save the plot
 			save_plot()

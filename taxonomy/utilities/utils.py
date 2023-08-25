@@ -21,14 +21,13 @@ from scipy import stats
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.data import Data, LoadChestXrayDatasets, Metrics, NodeData
+from taxonomy.utilities.data import Data, Findings, LoadChestXrayDatasets, Metrics, ModelFindings, NodeData
 from taxonomy.utilities.model import LoadModelXRV
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, TechniqueNames, ThreshTechList
-from taxonomy.utilities.settings import get_settings
-
+from taxonomy.utilities.settings import get_settings, Settings
 
 USE_CUDA = torch.cuda.is_available()
-
+device = 'cuda' if USE_CUDA else 'cpu'
 
 class SaveFile:
 	def __init__(self, path):
@@ -100,81 +99,80 @@ class LoadSaveFindings:
 
 class CalculateOriginalFindings:
 
-	def __init__(self, data, model, config, criterion=torch.nn.BCELoss(reduction='none')):  # type: (Data, torch.nn.Module, argparse.Namespace, torch.nn.Module) -> None
-		self.device 			  = 'cuda' if USE_CUDA else 'cpu'
-		self.criterion            = criterion
-		self.n_batches_to_process = config   .n_batches_to_process
-		self.model                = model
-		self.config               = config
-		self.save_path_full       = f'details/{config.DEFAULT_}/baseline/findings_original_{data.data_mode}.pkl'
+	def __init__(self, data: Data, model: torch.nn.Module, config: Settings):
+		self.findings_original = Findings(data=data, model=model, config=config)
+		self.save_path_full    = config.output.path / 'details' / 'baseline' / 'findings_original.pkl'
 
-		data.initialize_findings(pathologies=self.model.pathologies, experiment_stage=ExperimentStageNames.ORIGINAL)
-		self.data = data
+	def calculate(self, data: Data,) -> Data:
 
-	@staticmethod
-	def calculate(data, model, n_batches_to_process, device='cpu', criterion=torch.nn.BCELoss(reduction='none')):  # type: (Data, torch.nn.Module, int, str, torch.nn.Module) -> Data
+		data               = self.findings_original.data
+		model              = self.findings_original.model
+		pathologies        = self.findings_original.model.pathologies
+		loss_function      = self.findings_original.config.training.criterion.function
+		batches_to_process = self.findings_original.config.training.batches_to_process
+		modelFindings      = self.findings_original.modelFindings
 
 		model.eval()
 
+		def process_one_batch(batch_data_in):
+
+			def get_truth_and_predictions():
+
+				# Sample data and its corresponding labels
+				images = batch_data_in["img"].to(device)
+				truth  = batch_data_in["lab"].to(device)
+
+				# Feeding the samples into the model
+				logit = self.findings_original.model(images)
+				pred  = torch.sigmoid(logit) # .detach().numpy()
+
+				return pred , logit , truth
+
+			# Getting the true and predicted labels
+			pred_batch, logit_batch, truth_batch = get_truth_and_predictions()
+
+			# Getting the index of the samples for this batch
+			index = batch_data_in['idx'].detach().cpu().numpy()
+
+			def get_loss_per_sample_batch():
+				nonlocal pred_batch, truth_batch, index
+
+				l_batch = pd.DataFrame(columns=pathologies, index=index)
+
+				for ix, lbl_name in enumerate(pathologies):
+
+					# This skips the empty labels (i.e. the labels that are not in both the dataset & model)
+					if len(lbl_name) == 0: continue
+
+					task_truth, task_pred = truth_batch[:, ix].double() , pred_batch[:, ix].double()
+
+					# Calculating the loss per sample
+					l_batch[lbl_name] = loss_function(task_pred, task_truth).detach().cpu().numpy()
+
+				return l_batch
+
+			loss_per_sample_batch = get_loss_per_sample_batch()
+
+			# Converting the outputs and targets to dataframes
+			# to_df = lambda data: pd.DataFrame(data.detach().cpu().numpy(), columns=model.pathologies, index=index)
+			to_df = lambda data_tensor: pd.DataFrame(data_tensor.detach().cpu(), columns=model.pathologies, index=index)
+
+			return to_df(pred_batch), to_df(logit_batch), to_df(truth_batch), loss_per_sample_batch
+
 		def looping_over_all_batches() -> None:
-
-			def process_one_batch(batch_data_in):
-
-				def get_truth_and_predictions():
-
-					# Sample data and its corresponding labels
-					images = batch_data_in["img"].to(device)
-					truth  = batch_data_in["lab"].to(device)
-
-					# Feeding the samples into the model
-					logit = model(images)
-					pred  = torch.sigmoid(logit) # .detach().numpy()
-
-					return pred , logit , truth
-
-				def get_loss_per_sample_batch(pred_batch, truth_batch, index):
-
-					l_batch = pd.DataFrame(columns=model.pathologies, index=index)
-
-					for ix, lbl_name in enumerate(model.pathologies):
-
-						# This skips the empty labels (i.e. the labels that are not in both the dataset & model)
-						if len(lbl_name) == 0: continue
-
-						task_truth, task_pred = truth_batch[:, ix].double() , pred_batch[:, ix].double()
-
-						# Calculating the loss per sample
-						l_batch[lbl_name] = criterion(task_pred, task_truth).detach().cpu().numpy()
-
-					return l_batch
-
-
-				# Getting the true and predicted labels
-				pred_batch, logit_batch, truth_batch = get_truth_and_predictions()
-
-				# Getting the index of the samples for this batch
-				index = batch_data_in['idx'].detach().cpu().numpy()
-
-				loss_per_sample_batch = get_loss_per_sample_batch(pred_batch, truth_batch, index)
-
-				# Converting the outputs and targets to dataframes
-				# to_df = lambda data: pd.DataFrame(data.detach().cpu().numpy(), columns=model.pathologies, index=index)
-				to_df = lambda data: pd.DataFrame(data.detach().cpu(), columns=model.pathologies, index=index)
-
-				return to_df(pred_batch), to_df(logit_batch), to_df(truth_batch), loss_per_sample_batch
 
 			for batch_idx, batch_data in enumerate(data.data_loader):
 
-				# This ensures that  we only evaluate the data for a few batches. End the loop after n_batches_to_process
-				if n_batches_to_process and (batch_idx >= n_batches_to_process): break
+				# This ensures that we only evaluate the data for a few batches. End the loop after n_batches_to_process
+				if batch_idx >= batches_to_process: break
 
 				pred, logit, truth, loss = process_one_batch(batch_data)
 
 				# Appending the results for this batch to the results
-				data.ORIGINAL.pred  = pd.concat([data.ORIGINAL.pred , pred ])
-				data.ORIGINAL.logit = pd.concat([data.ORIGINAL.logit, logit])
-				data.ORIGINAL.truth = pd.concat([data.ORIGINAL.truth, truth])
-				data.ORIGINAL.loss  = pd.concat([data.ORIGINAL.loss , loss ])
+				modelFindings.pred_values  = pd.concat([modelFindings.pred_values , pred ])
+				modelFindings.logit_values = pd.concat([modelFindings.logit_values, logit])
+				modelFindings.truth_values = pd.concat([modelFindings.truth_values, truth])
+				modelFindings.loss_values  = pd.concat([modelFindings.loss_values , loss ])
 
 		with torch.no_grad():
 
@@ -190,7 +188,7 @@ class CalculateOriginalFindings:
 	def do_calculate(self):
 
 		# Calculating the ORIGINAL findings
-		params = {key: getattr(self, key) for key in ['data', 'model', 'device' , 'criterion' , 'n_batches_to_process']}
+		params = {key: getattr(self, key) for key in ['data', 'model', 'device' , 'criterion']}
 		self.data = CalculateOriginalFindings.calculate(**params)
 
 		# Adding the ORIGINAL findings to the graph nodes
@@ -806,49 +804,6 @@ class TaxonomyXRV:
 
 		return df.round(decimals=3).replace(np.nan, '', regex=True)
 
-	@staticmethod
-	def calculating_threshold_and_metrics(DATA):  # type: (Findings) -> Findings
-		for x in ThreshTechList:
-			for node in DATA.pathologies:
-				DATA = TaxonomyXRV.calculating_threshold_and_metrics_per_node(node=node, findings=DATA, thresh_technique=x)
-
-		return DATA
-
-	@staticmethod
-	def calculating_threshold_and_metrics_per_node(node: str, findings: Findings, thresh_technique: ThreshTechList) -> Findings:
-
-		def calculating_optimal_thresholds(y, yhat, x):
-
-			if x == 'DEFAULT':
-				findings.metrics[x,node]['Threshold'] = 0.5
-
-			if x == 'ROC':
-				fpr, tpr, th = sklearn.metrics.roc_curve(y, yhat)
-				findings.metrics[x,node]['Threshold'] = th[np.argmax( tpr - fpr )]
-
-			if x == 'PRECISION_RECALL':
-				ppv, recall, th = sklearn.metrics.precision_recall_curve(y, yhat)
-				f_score = 2 * (ppv * recall) / (ppv + recall)
-				findings.metrics[x,node]['Threshold'] = th[np.argmax( f_score )]
-
-		def calculating_metrics(y, yhat, x):
-			findings.metrics[x, node][EvaluationMetricNames.AUC.name] = sklearn.metrics.roc_auc_score(y, yhat)
-			findings.metrics[x, node][EvaluationMetricNames.ACC.name] = sklearn.metrics.accuracy_score(y, yhat >= findings.metrics[x, node]['Threshold'])
-			findings.metrics[x, node][EvaluationMetricNames.F1.name]  = sklearn.metrics.f1_score      (y, yhat >= findings.metrics[x, node]['Threshold'])
-
-		# Finding the indices where the truth is not nan
-		non_null = ~np.isnan( findings.truth[node] )
-		truth_notnull = findings.truth[node][non_null].to_numpy()
-
-		if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-			# for thresh_technique in ThreshTechList:
-			pred = findings.pred[node] if findings.experiment_stage == ExperimentStageNames.ORIGINAL else findings.pred[thresh_technique,node]
-			pred_notnull = pred[non_null].to_numpy()
-
-			calculating_optimal_thresholds(y = truth_notnull, yhat = pred_notnull, x = thresh_technique)
-			calculating_metrics(y            = truth_notnull, yhat = pred_notnull, x = thresh_technique)
-
-		return findings
 
 	def save_metrics(self):
 
@@ -896,7 +851,7 @@ class TaxonomyXRV:
 		LD = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
 		LD.load()
 
-		return LD.train, LD.test, model, LD.dataset
+		return LD.train, LD.test, model, LD.dataset_full
 
 	@classmethod
 	def run_full_experiment(cls, methodName=TechniqueNames.LOSS_BASED, seed=10, **kwargs):
@@ -1050,29 +1005,6 @@ class TaxonomyXRV:
 			output[x] = TaxonomyXRV.get_all_metrics(datasets_list=datasets_list, data_mode=data_mode, thresh_technique=x)
 
 		return MetricsAllTechniqueThresholds(**output)
-
-	@staticmethod
-	def check(check_what='labels', jupyter=True, **kwargs):
-
-		config = get_settings(jupyter=jupyter)
-
-		if check_what == 'config':
-			return config
-
-		elif check_what == 'model':
-			LM = LoadModelXRV(config)
-			LM.load()
-			return LM
-
-		elif check_what in ('DT', 'labels', 'dataset', 'show_graph'):
-			model = LoadModelXRV(config).load()
-			DT = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
-			DT.load()
-
-			if   check_what == 'DT':	     return DT
-			elif check_what == 'labels':     return getattr(DT, kwargs['data_mode']).labels
-			elif check_what == 'dataset': 	 return DT.dataset
-			elif check_what == 'show_graph': DT.train.Hierarchy_cls.show(package=kwargs['package'])
 
 
 
