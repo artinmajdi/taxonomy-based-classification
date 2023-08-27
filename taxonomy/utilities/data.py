@@ -5,7 +5,7 @@ import pathlib
 import pickle
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, InitVar
-from functools import cached_property, singledispatch, singledispatchmethod, wraps
+from functools import cached_property, singledispatch, wraps
 from typing import Any, Optional, Union
 
 import networkx as nx
@@ -14,7 +14,6 @@ import pandas as pd
 import torch
 import torchvision
 from matplotlib import pyplot as plt
-from pandas import DataFrame
 from torch.utils.data import DataLoader as torch_DataLoader
 
 import torchxrayvision as xrv
@@ -467,84 +466,82 @@ class LoadChestXrayDatasets:
 	def available_datasets(self):
 		return [DatasetNames.CHEXPERT, DatasetNames.NIH, DatasetNames.PC]
 
+def check_file_exist(func):
+	@wraps(func)
+	def wrapper(self, file_path: Union[str, pathlib.Path], *args, **kwargs):
+		if not (file_path := pathlib.Path(file_path)).is_file():
+			raise FileNotFoundError(f'file_path {file_path} does not exist')
+		return func(self, file_path, *args, **kwargs)
+	return wrapper
+
+def create_file_path_if_not_exist(func):
+	@wraps(func)
+	def wrapper(self, file_path: Union[str, pathlib.Path], *args, **kwargs):
+		file_path = pathlib.Path(file_path)
+		file_path.parent.mkdir(parents=True, exist_ok=True)
+		return func(self, file_path, *args, **kwargs)
+	return wrapper
 
 class LoadSaveFile(ABC):
 
-	@staticmethod
-	def check_file_path_exist(func):
-		@wraps(func)
-		def wrapper(self, file_path: pathlib.Path, *args, **kwargs):
-			if not file_path.exists():
-				raise FileNotFoundError(f'file_path {file_path} does not exist')
-			return func(self, file_path, *args, **kwargs)
-		return wrapper
+	@check_file_exist
+	def load(self, file_path: Union[str, pathlib.Path], **kwargs) -> Union[dict, pd.DataFrame, plt.Figure]:
 
-	@staticmethod
-	def create_file_path_if_not_exist(func):
-		@wraps(func)
-		def wrapper(self, file_path: pathlib.Path, *args, **kwargs):
-			file_path.parent.mkdir(parents=True, exist_ok=True)
-			return func(self, file_path, *args, **kwargs)
-		return wrapper
+		if file_path.suffix == '.pkl':
+			with open(file_path, 'rb') as f:
+				return pickle.load(f)
 
-	@singledispatchmethod
-	@abstractmethod
-	@check_file_path_exist
-	def load(self, file_path: pathlib.Path):
-		file_extension = file_path.suffix[1:]
-		raise NotImplementedError(f'file_type {file_extension} is not supported')
+		if file_path.suffix == '.json':
+			with open(file_path, 'r') as f:
+				return json.load(f)
 
-	@load.register('pkl')
-	def _(self, file_path: pathlib.Path) -> Any:
-		with open(file_path, 'rb') as f:
-			return pickle.load(f)
+		if file_path.suffix == '.csv':
+			return pd.read_csv(file_path, **kwargs)
 
-	@load.register('csv')
-	def _(self, file_path: pathlib.Path) -> DataFrame:
-		return pd.read_csv(file_path)
+		if file_path.suffix == '.xlsx':
+			return pd.read_excel(file_path, **kwargs)
 
-	@load.register('xlsx')
-	def _(self, file_path: pathlib.Path, **kwargs) -> pd.DataFrame:
-		return pd.read_excel(file_path, **kwargs)
+		if file_path.suffix == '.png':
+			return plt.imread(file_path)
 
-	@load.register('png')
-	def _(self, file_path: pathlib.Path) -> plt.Figure:
-		return plt.imread(file_path)
+		if file_path.suffix == '.tif':
+			return plt.imread(file_path)
 
-	@load.register('tif')
-	def _(self, file_path: pathlib.Path) -> plt.Figure:
-		return plt.imread(file_path)
-
+		raise NotImplementedError(f'file_type {file_path.suffix} is not supported')
 
 	@singledispatch
-	@abstractmethod
 	@create_file_path_if_not_exist
-	def save(self, file_path: pathlib.Path, data: Any, **kwargs):
+	def save(self, data: Any, file_path: Union[str, pathlib.Path], **kwargs):
 		raise NotImplementedError(f'file_type {type(data)} is not supported')
 
 	@save.register(dict)
-	def _(self, file_path: pathlib.Path, data: dict) -> None:
+	def save(self, data: dict, file_path: Union[str, pathlib.Path], **kwargs) -> None:
 		assert file_path.suffix in {'.pkl', '.json'}, ValueError( f'file type {file_path.suffix} is not supported' )
 
 		if file_path.suffix == '.pkl':
 			with open(file_path, 'wb') as f:
 				pickle.dump(data, f)
 
-		with open(file_path, 'w') as f:
-			json.dump(data, f)
+		elif file_path.suffix == '.json':
+			with open(file_path, 'w') as f:
+				json.dump(data, f)
+
+		elif file_path.suffix == '.xlsx':
+			# Recursively call 'save' but with a DataFrame object
+			self.save(pd.DataFrame.from_dict(data), file_path, **kwargs)
 
 	@save.register(pd.Series)
-	def _(self, file_path: pathlib.Path, data: pd.Series, **kwargs):
+	def save(self, data: pd.Series, file_path: Union[str, pathlib.Path], **kwargs):
 		assert file_path.suffix == '.csv', ValueError(f'file type {file_path.suffix} is not supported')
 		data.to_csv(file_path, **kwargs)
 
 	@save.register(pd.DataFrame)
-	def _(self, file_path: pathlib.Path, data: pd.DataFrame, **kwargs) -> None:
+	def save(self, data: pd.DataFrame, file_path: Union[str, pathlib.Path], **kwargs) -> None:
 		assert file_path.suffix == '.xlsx', ValueError(f'file type {file_path.suffix} is not supported')
 		data.to_excel(file_path, **kwargs)
 
 	@save.register(plt.Figure)
-	def _(self, file_path: pathlib.Path, data: plt.Figure, file_format: Union[str, list[str]] = None, **kwargs):
+	def save(self, data: plt.Figure, file_path: Union[str, pathlib.Path], file_format: Union[str, list[str]] = None, **kwargs):
 		file_format = file_format or [file_path.suffix]
 		file_format = [file_format] if isinstance(file_format, str) else file_format
 
