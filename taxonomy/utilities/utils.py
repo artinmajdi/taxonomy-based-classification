@@ -50,7 +50,7 @@ class CalculateOriginalFindings(LoadSaveFile):
 		pathologies        = self.findings_original.model.pathologies
 		loss_function      = self.findings_original.config.training.criterion.function
 		batches_to_process = self.findings_original.config.training.batches_to_process
-		modelFindings      = self.findings_original.modelFindings
+		modelFindings      = self.findings_original.modelOutputs
 
 		model.eval()
 

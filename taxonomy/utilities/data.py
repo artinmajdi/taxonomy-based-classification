@@ -24,65 +24,80 @@ USE_CUDA = torch.cuda.is_available()
 
 
 @dataclass
-class Nodes:
-	CLASSES          : set[str]
-	NON_NULL         : set[str] 		   = field(default_factory = set)
-	IMPACTED         : set[str] 		   = field(default_factory = set)
-	TAXONOMY         : dict[str, set[str]] = field(default_factory = dict)
-	EXIST_IN_TAXONOMY: set[str] 	       = field(default_factory = set)
+class Labels:
+	LABEL_SET: Union[np.ndarray, pd.DataFrame]
+	classes  : set[str] = None
 
 	def __post_init__(self):
-		self.TAXONOMY          = self._taxonomy()
-		self.EXIST_IN_TAXONOMY = self._exist_in_taxonomy()
 
-	@staticmethod
-	def _default_taxonomy() -> dict[str, set[str]]:
-		return {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
+		if isinstance(self.LABEL_SET, pd.DataFrame):
+			self.classes = set( self.LABEL_SET.columns.to_list() )
+		else:
+			assert self.classes is not None, "CLASSES must be provided if LABEL_SET is not a pandas DataFrame"
+			self.LABEL_SET = pd.DataFrame( self.LABEL_SET, columns=list( self.classes ) )
 
-	def _taxonomy(self):  # sourcery skip: dict-comprehension
-		UT = {}
-		for parent in self._default_taxonomy():
-			if parent in self.CLASSES:
-				UT[parent] = self._default_taxonomy()[parent].intersection(self.CLASSES)
 
-		return UT or None
+@dataclass
+class Nodes:
+	labels  : InitVar[Labels]
+	graph   :     nx.DiGraph = field(default_factory = nx.DiGraph)
+	classes :            set = field(default_factory = set)
+	NON_NULL:            set = field(default_factory = set)
+	IMPACTED:            set = field(default_factory = set)
+	_default_taxonomy:  dict = field(default_factory = dict)
 
-	def _exist_in_taxonomy(self) -> set[str]:
+	def __post_init__(self, labels):
+
+		if self._default_taxonomy is None:
+			self._default_taxonomy: dict = {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
+
+		self.classes = labels.classes
+		self._update_other_parameters(LABEL_SET=labels.LABEL_SET)
+
+	def _update_other_parameters(self, LABEL_SET: pd.DataFrame = None):
+
+		self.graph = self._construct_graph()
+
+		if LABEL_SET and LABEL_SET.size > 0:
+			self.NON_NULL = set(LABEL_SET.columns[LABEL_SET.count() > 0].to_list())
+
+		self.IMPACTED = self.NON_NULL.intersection( self.exist_in_taxonomy )
+
+	@property
+	def default_taxonomy(self) -> dict[str, set[str]]:
+		return self._default_taxonomy
+
+	@default_taxonomy.setter
+	def default_taxonomy(self, value: dict):
+		self._default_taxonomy = value
+		self._update_other_parameters()
+
+	@property
+	def taxonomy(self):
+		return {
+			parent: self.default_taxonomy[parent].intersection( self.classes )
+			for parent in self.default_taxonomy
+			if parent in self.classes
+		}
+
+	@cached_property
+	def exist_in_taxonomy(self) -> set:
+
+		if len( self.taxonomy ) ==0:
+			return set()
 
 		# Adding the parent classes
-		eit = set(self.TAXONOMY.keys())
+		eit = set( self.taxonomy.keys() )
 
 		# Adding the children classes
-		for value in self.TAXONOMY.values():
+		for value in self.taxonomy.values():
 			eit.update(value)
 
 		return eit
 
-	@property
-	def node_thresh_tuple(self):
-		return list(itertools.product(self.IMPACTED, ThreshTechList))
-
-	def get_children_of(self, parent: str) -> set[str]:
-		return self.TAXONOMY.get(parent, set())
-
-	def get_parent_of(self, child: str) -> str | None:
-		return next((parent for parent in self.TAXONOMY if child in self.TAXONOMY[parent]), None)
-
-
-@dataclass
-class NodeData:
-	CLASSES: set[str]
-
-	def __post_init__(self):
-		self.graph = self._construct_graph()
-
-	@cached_property
-	def nodes(self) -> Nodes:
-		return Nodes(CLASSES=self.CLASSES)
-
 	def _construct_graph(self) -> nx.DiGraph:
-		graph = nx.DiGraph(self.nodes.TAXONOMY)
-		graph.add_nodes_from(self.nodes.CLASSES)
+		graph = nx.DiGraph( self.taxonomy )
+		graph.add_nodes_from( self.classes )
 		return graph
 
 	def add_hyperparameters_to_node(self, parent_node: str, child_node: str, hyperparameter: dict[HyperparameterNames, float]):
@@ -97,6 +112,16 @@ class NodeData:
 
 	def get_hierarchy_penalty(self, node: str) -> float:
 		return self.graph.nodes[node].get('hierarchy_penalty', None)
+
+	@cached_property
+	def node_thresh_tuple(self):
+		return list(itertools.product(self.IMPACTED, ThreshTechList.members()))
+
+	def get_children_of(self, parent: str) -> set[str]:
+		return self.taxonomy.get( parent, set() )
+
+	def get_parent_of(self, child: str) -> str | None:
+		return next( (parent for parent in self.taxonomy if child in self.taxonomy[parent]), None )
 
 	def show(self, package='networkx'):
 
@@ -165,50 +190,35 @@ class NodeData:
 
 
 @dataclass
-class Labels:
-	LABEL_SET: Union[np.ndarray, pd.DataFrame]
-	CLASSES  : list[str]
-	nodes	 : Nodes = field(default_factory=lambda: None)
-
-	def __post_init__(self):
-		self.nodes: Nodes = Nodes(CLASSES=set(self.CLASSES))
-		self.LABEL_SET = pd.DataFrame(self.LABEL_SET, columns=self.CLASSES)
-
-		if self.LABEL_SET.size > 0:
-			self.nodes.NON_NULL = self.LABEL_SET.columns[self.LABEL_SET.count() > 0].to_list()
-			self.nodes.IMPACTED = [x for x in self.nodes.NON_NULL if x in self.nodes.EXIST_IN_TAXONOMY]
-
-
-@dataclass
 class Data:
 	dataset    : xrv.datasets.Dataset
 	data_loader: torch_DataLoader
-	labels     : Labels    = field(default_factory = lambda: None)
-	dataMode   : DataModes = field(default_factory = lambda: None)
-	nodeData   : NodeData  = field(default_factory = lambda: None)
+	labels     : Labels    = None
+	dataMode   : DataModes = None
+	nodes      : Nodes     = None
 
 	def __post_init__(self):
-		self.labels   = Labels(LABEL_SET=self.dataset.labels, CLASSES=self.dataset.pathologies)
-		self.nodeData = NodeData(set(self.dataset.pathologies))
+		self.labels = Labels(LABEL_SET=self.dataset.labels, classes=set(self.dataset.pathologies))
+		self.nodes  = Nodes(labels=self.labels)
 
 
 @dataclass
 class Metrics:
-	pathologies: InitVar[set[str]]
-	ACC        : Optional[pd.DataFrame] = None
-	AUC        : Optional[pd.DataFrame] = None
-	F1         : Optional[pd.DataFrame] = None
-	THRESHOLD  : Optional[pd.DataFrame] = None
+	classes  : InitVar[set[str]]
+	ACC      : Optional[pd.DataFrame] = None
+	AUC      : Optional[pd.DataFrame] = None
+	F1       : Optional[pd.DataFrame] = None
+	THRESHOLD: Optional[pd.DataFrame] = None
 
-	def __post_init__(self, pathologies: set[str]):
-		self.ACC       = pd.DataFrame(columns = list(pathologies), dtype = float)
-		self.AUC       = pd.DataFrame(columns = list(pathologies), dtype = float)
-		self.F1        = pd.DataFrame(columns = list(pathologies), dtype = float)
-		self.THRESHOLD = pd.DataFrame(columns = list(pathologies), dtype = float)
+	def __post_init__(self, classes: set[str]):
+		self.ACC       = pd.DataFrame(columns = list(classes), dtype = float)
+		self.AUC       = pd.DataFrame(columns = list(classes), dtype = float)
+		self.F1        = pd.DataFrame(columns = list(classes), dtype = float)
+		self.THRESHOLD = pd.DataFrame(columns = list(classes), dtype = float)
 
 
 @dataclass
-class ModelFindings:
+class ModelOutputs:
 	""" Class for storing model-related findings. """
 	truth_values: pd.DataFrame = field(default_factory = pd.DataFrame)
 	loss_values : pd.DataFrame = field(default_factory = pd.DataFrame)
@@ -222,18 +232,21 @@ class Findings:
 	config         : Settings
 	data           : Data
 	model          : torch.nn.Module
-	modelFindings  : ModelFindings        = None
-	metrics        : Metrics              = None
+	modelOutputs   : ModelOutputs = None
+	metrics        : Metrics      = None
 	experimentStage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
 
+	def __post_init__(self):
+		self.modelOutputs = ModelOutputs()
+		self.metrics      = Metrics( classes=self.data.labels.classes )
 
 @dataclass
 class LoadChestXrayDatasets:
-	config      : argparse.Namespace   = field(default_factory  = lambda: None)
-	dataset_full: xrv.datasets.Dataset = field( default_factory = lambda: None)
-	train       : Data                 = field(default_factory  = lambda: None)
-	test        : Data                 = field(default_factory  = lambda: None)
-	nodeData    : NodeData             = field(default_factory  = lambda: None)
+	config: Settings = None
+	train : Data     = None
+	test  : Data     = None
+	nodes : Nodes    = None
+	dataset_full: xrv.datasets.Dataset = None
 
 	def load_raw_database(self):
 		"""
@@ -361,7 +374,7 @@ class LoadChestXrayDatasets:
 				}
 
 		self.dataset_full = dataset_config.get( self.config.datasetName )( **params_config.get( self.config.datasetName ) )
-		self.nodeData     = NodeData(set(self.dataset_full.pathologies))
+		self.nodes     = NodeData( set( self.dataset_full.pathologies ) )
 
 	def relabel_raw_database(self):
 		from taxonomy.utilities.model import LoadModelXRV
@@ -381,7 +394,7 @@ class LoadChestXrayDatasets:
 
 		labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
 
-		for parent, children in self.nodeData.nodes.TAXONOMY.items():
+		for parent, children in self.nodes.nodes.taxonomy.items():
 
 			# Checking if the parent class existed in the original pathologies in the dataset_full.
 			# Will only replace its values if all its labels are NaN
@@ -413,7 +426,7 @@ class LoadChestXrayDatasets:
 
 		labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
 
-		for parent in self.nodeData.nodes.TAXONOMY:
+		for parent in self.nodes.nodes.taxonomy:
 
 			# Extracting the samples with a non-null value for the parent truth label
 			labels  = labels[ ~labels[parent].isna() ]
@@ -421,7 +434,7 @@ class LoadChestXrayDatasets:
 			labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
 
 			# Extracting the samples, where for each parent, at least one of their children has a non-null truth label
-			labels  = labels[ (~labels[ self.nodeData.nodes.TAXONOMY[parent] ].isna()).sum(axis=1) > 0 ]
+			labels  = labels[(~labels[ self.nodes.nodes.taxonomy[parent]].isna()).sum( axis=1 ) > 0]
 			self.dataset_full = xrv.datasets.SubsetDataset( self.dataset_full, idxs=labels.index )
 
 	def load(self):

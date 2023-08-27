@@ -11,18 +11,22 @@ import sklearn
 import umap
 from matplotlib import pyplot as plt
 
-from taxonomy.utilities.data import Labels, LoadChestXrayDatasets, Metrics, LoadSaveFile
+from taxonomy.utilities.data import Findings, Labels, LoadChestXrayDatasets, Metrics, LoadSaveFile
 from taxonomy.utilities.model import extract_feature_maps
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import get_settings
 from taxonomy.utilities.utils import TaxonomyXRV
 
-def calculating_threshold_and_metrics(DATA) -> Metrics:
+def calculating_threshold_and_metrics(findings: Findings) -> Metrics:
 
-	metrics = Metrics()
+	classes = findings.data.nodeData.nodes.classes
+	metrics = Metrics(pathologies=classes)
 
 	def calculating_threshold_and_metrics_per_node(node: str, findings: Findings, thresh_technique: ThreshTechList) -> Findings:
+
+		truth = findings.modelOutputs.truth_values
+		pred = findings.modelOutputs.pred_values
 
 		def calculating_optimal_thresholds(y, yhat):
 
@@ -44,12 +48,11 @@ def calculating_threshold_and_metrics(DATA) -> Metrics:
 			metrics.F1  = sklearn.metrics.f1_score      (y, yhat >= findings.metrics[x, node]['Threshold'])
 
 		# Finding the indices where the truth is not nan
-		non_null = ~np.isnan( findings.truth[node] )
-		truth_notnull = findings.truth[node][non_null].to_numpy()
+		non_null = ~np.isnan(truth[node])
+		truth_notnull = truth[node][non_null].to_numpy()
 
 		if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-			# for thresh_technique in ThreshTechList:
-			pred = findings.pred[node] if findings.experiment_stage == ExperimentStageNames.ORIGINAL else findings.pred[thresh_technique,node]
+			pred = findings.modelOutputs.pred_values[node]
 			pred_notnull = pred[non_null].to_numpy()
 
 			calculating_optimal_thresholds( y = truth_notnull, yhat = pred_notnull)
