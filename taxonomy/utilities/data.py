@@ -3,7 +3,6 @@ import itertools
 import json
 import pathlib
 import pickle
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, InitVar
 from functools import cached_property, singledispatch, wraps
 from typing import Any, Optional, Union
@@ -477,12 +476,11 @@ def check_file_exist(func):
 def create_file_path_if_not_exist(func):
 	@wraps(func)
 	def wrapper(self, file_path: Union[str, pathlib.Path], *args, **kwargs):
-		file_path = pathlib.Path(file_path)
-		file_path.parent.mkdir(parents=True, exist_ok=True)
+		(file_path := pathlib.Path(file_path)).parent.mkdir(parents=True, exist_ok=True)
 		return func(self, file_path, *args, **kwargs)
 	return wrapper
 
-class LoadSaveFile(ABC):
+class LoadSaveFile:
 
 	@check_file_exist
 	def load(self, file_path: Union[str, pathlib.Path], **kwargs) -> Union[dict, pd.DataFrame, plt.Figure]:

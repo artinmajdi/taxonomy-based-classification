@@ -11,12 +11,12 @@ import sklearn
 import umap
 from matplotlib import pyplot as plt
 
-from taxonomy.utilities.data import Labels, LoadChestXrayDatasets, Metrics
+from taxonomy.utilities.data import Labels, LoadChestXrayDatasets, Metrics, LoadSaveFile
 from taxonomy.utilities.model import extract_feature_maps
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import get_settings
-from taxonomy.utilities.utils import LoadSaveFindings, TaxonomyXRV
+from taxonomy.utilities.utils import TaxonomyXRV
 
 def calculating_threshold_and_metrics(DATA) -> Metrics:
 
