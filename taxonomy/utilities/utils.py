@@ -1,13 +1,16 @@
 import argparse
 import concurrent.futures
 import contextlib
+import json
 import multiprocessing
 import pathlib
 import pickle
+from abc import ABC, abstractmethod
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from functools import singledispatch, singledispatchmethod, wraps
+from typing import Any, Dict, List, Literal, Optional, overload, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -17,87 +20,24 @@ import sklearn
 import torch
 from hyperopt import fmin, hp, tpe
 from matplotlib import pyplot as plt
+from pandas import DataFrame
 from scipy import stats
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.data import Data, Findings, LoadChestXrayDatasets, Metrics, ModelFindings, NodeData
+from taxonomy.utilities.data import Data, Findings, LoadChestXrayDatasets, Metrics, NodeData
 from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, TechniqueNames, ThreshTechList
+from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
+	TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import get_settings, Settings
 
 USE_CUDA = torch.cuda.is_available()
 device = 'cuda' if USE_CUDA else 'cpu'
 
-class SaveFile:
-	def __init__(self, path):
-		self.path = path
-
-	def load(self, index_col=None, header=None):
-
-		if self.path.exists():
-
-			if self.path.suffix == '.pkl':
-				with open(self.path, 'rb') as f:
-					return pickle.load(f)
-
-			elif self.path.suffix == '.csv':
-				return pd.read_csv(self.path)
-
-			elif self.path.suffix == '.xlsx':
-				return pd.read_excel(self.path, index_col=index_col, header=header)
-
-		return None
-
-	def dump(self, file, index=False):
-
-		self.path.parent.mkdir(parents=True, exist_ok=True)
-
-		if self.path.suffix == '.pkl':
-			with open(self.path, 'wb') as f:
-				pickle.dump(file, f)
-
-		elif self.path.suffix == '.csv':
-			file.to_csv(self.path, index=index)
-
-		elif self.path.suffix == '.xlsx':
-			file.to_excel(self.path, index=index)
 
 
-class SaveFigure:
 
-	def __init__(self, config, path=''):
-		self.config   = config
-		self.path    = self.config.PATH_LOCAL.joinpath(path)
-
-	def load(self):
-		return plt.imread(self.path) if self.path.exists() else None
-
-	def dump(self):
-		self.path.parent.mkdir(parents=True, exist_ok=True)
-
-		for format in ['png', 'eps', 'svg', 'pdf']:
-
-			path = self.path.with_suffix(f'.{format}')
-			plt.savefig(path, format=format, dpi=300)
-
-
-class LoadSaveFindings:
-	def __init__(self, config, relative_path: Union[str, pathlib.Path]='sth.pkl'):
-		""" relative_path can be one of [findings_original, findings_new, hyperparameters.pkl]"""
-
-		self.config   = config
-		self.relative_path = relative_path
-		self.path = self.config.PATH_LOCAL.joinpath(relative_path)
-
-	def save(self, data, **kwargs):
-		SaveFile(self.path).dump(data, **kwargs)
-
-	def load(self, **kwargs):
-		return SaveFile(self.path).load(**kwargs)
-
-
-class CalculateOriginalFindings:
+class CalculateOriginalFindings(LoadSaveFile):
 
 	def __init__(self, data: Data, model: torch.nn.Module, config: Settings):
 		self.findings_original = Findings(data=data, model=model, config=config)

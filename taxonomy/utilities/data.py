@@ -1,15 +1,20 @@
 import argparse
 import itertools
+import json
 import pathlib
+import pickle
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, InitVar
-from functools import cached_property
-from typing import Optional, Union
+from functools import cached_property, singledispatch, singledispatchmethod, wraps
+from typing import Any, Optional, Union
 
 import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
 import torchvision
+from matplotlib import pyplot as plt
+from pandas import DataFrame
 from torch.utils.data import DataLoader as torch_DataLoader
 
 import torchxrayvision as xrv
@@ -206,19 +211,21 @@ class Metrics:
 
 @dataclass
 class ModelFindings:
-	truth_values: pd.DataFrame = field( default_factory = lambda: None )
-	loss_values : pd.DataFrame = field(default_factory  = lambda: None)
-	logit_values: pd.DataFrame = field(default_factory  = lambda: None)
-	pred_values : pd.DataFrame = field(default_factory  = lambda: None)
+	""" Class for storing model-related findings. """
+	truth_values: pd.DataFrame = field(default_factory = pd.DataFrame)
+	loss_values : pd.DataFrame = field(default_factory = pd.DataFrame)
+	logit_values: pd.DataFrame = field(default_factory = pd.DataFrame)
+	pred_values : pd.DataFrame = field(default_factory = pd.DataFrame)
 
 
 @dataclass
 class Findings:
+	""" Class for storing overall findings including configuration, data, and metrics. """
 	config         : Settings
 	data           : Data
 	model          : torch.nn.Module
-	modelFindings  : ModelFindings        = field(default_factory = lambda: ModelFindings())
-	metrics        : Metrics              = field(default_factory = lambda: Metrics())
+	modelFindings  : ModelFindings        = None
+	metrics        : Metrics              = None
 	experimentStage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
 
 
@@ -459,3 +466,87 @@ class LoadChestXrayDatasets:
 	@property
 	def available_datasets(self):
 		return [DatasetNames.CHEXPERT, DatasetNames.NIH, DatasetNames.PC]
+
+
+class LoadSaveFile(ABC):
+
+	@staticmethod
+	def check_file_path_exist(func):
+		@wraps(func)
+		def wrapper(self, file_path: pathlib.Path, *args, **kwargs):
+			if not file_path.exists():
+				raise FileNotFoundError(f'file_path {file_path} does not exist')
+			return func(self, file_path, *args, **kwargs)
+		return wrapper
+
+	@staticmethod
+	def create_file_path_if_not_exist(func):
+		@wraps(func)
+		def wrapper(self, file_path: pathlib.Path, *args, **kwargs):
+			file_path.parent.mkdir(parents=True, exist_ok=True)
+			return func(self, file_path, *args, **kwargs)
+		return wrapper
+
+	@singledispatchmethod
+	@abstractmethod
+	@check_file_path_exist
+	def load(self, file_path: pathlib.Path):
+		file_extension = file_path.suffix[1:]
+		raise NotImplementedError(f'file_type {file_extension} is not supported')
+
+	@load.register('pkl')
+	def _(self, file_path: pathlib.Path) -> Any:
+		with open(file_path, 'rb') as f:
+			return pickle.load(f)
+
+	@load.register('csv')
+	def _(self, file_path: pathlib.Path) -> DataFrame:
+		return pd.read_csv(file_path)
+
+	@load.register('xlsx')
+	def _(self, file_path: pathlib.Path, **kwargs) -> pd.DataFrame:
+		return pd.read_excel(file_path, **kwargs)
+
+	@load.register('png')
+	def _(self, file_path: pathlib.Path) -> plt.Figure:
+		return plt.imread(file_path)
+
+	@load.register('tif')
+	def _(self, file_path: pathlib.Path) -> plt.Figure:
+		return plt.imread(file_path)
+
+
+	@singledispatch
+	@abstractmethod
+	@create_file_path_if_not_exist
+	def save(self, file_path: pathlib.Path, data: Any, **kwargs):
+		raise NotImplementedError(f'file_type {type(data)} is not supported')
+
+	@save.register(dict)
+	def _(self, file_path: pathlib.Path, data: dict) -> None:
+		assert file_path.suffix in {'.pkl', '.json'}, ValueError( f'file type {file_path.suffix} is not supported' )
+
+		if file_path.suffix == '.pkl':
+			with open(file_path, 'wb') as f:
+				pickle.dump(data, f)
+
+		with open(file_path, 'w') as f:
+			json.dump(data, f)
+
+	@save.register(pd.Series)
+	def _(self, file_path: pathlib.Path, data: pd.Series, **kwargs):
+		assert file_path.suffix == '.csv', ValueError(f'file type {file_path.suffix} is not supported')
+		data.to_csv(file_path, **kwargs)
+
+	@save.register(pd.DataFrame)
+	def _(self, file_path: pathlib.Path, data: pd.DataFrame, **kwargs) -> None:
+		assert file_path.suffix == '.xlsx', ValueError(f'file type {file_path.suffix} is not supported')
+		data.to_excel(file_path, **kwargs)
+
+	@save.register(plt.Figure)
+	def _(self, file_path: pathlib.Path, data: plt.Figure, file_format: Union[str, list[str]] = None, **kwargs):
+		file_format = file_format or [file_path.suffix]
+		file_format = [file_format] if isinstance(file_format, str) else file_format
+
+		for fmt in (fmt if fmt.startswith('.') else f'.{fmt}' for fmt in file_format):
+			data.savefig(file_path.with_suffix(fmt), format=fmt.lstrip('.'), dpi=300, **kwargs)
