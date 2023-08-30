@@ -2,23 +2,85 @@ import argparse
 import json
 import pathlib
 import sys
+from dataclasses import dataclass, field, InitVar
+from typing import Any
 
 import pydantic
-from pydantic import validator
+from pydantic import field_validator
 
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, LossFunctionOptions, \
 	ModelWeightNames, \
 	ParentMetricToUseNames, SimulationOptions, TechniqueNames
 
 
+@dataclass
+class DatasetInfo:
+	datasetName      : DatasetNames
+	path_all_datasets: InitVar[pathlib.Path]
+	views	         : InitVar[list[str]]
+	data_mode        : InitVar[DataModes] = None
+	path             : pathlib.Path  	  = field(init=False)
+	csv_path         : pathlib.Path		  = field(init=False)
+	metadata_path    : pathlib.Path       = field(init=False)
+	params_config    : dict[str, Any]     = field(init=False)
+
+	def __post_init__(self, path_all_datasets: pathlib.Path, views: list[str], data_mode: DataModes):
+		self.path          = path_all_datasets / self._get_dataset_relative_path(data_mode)
+		self.csv_path      = path_all_datasets / self._get_csv_relative_path(data_mode)
+		self.metadata_path = path_all_datasets / self._get_metadata_relative_path()
+
+		self.params_config = {'imgpath':self.path, 'views':views, 'csvpath':self.csv_path, 'metacsvpath':self.metadata_path}
+
+
+	def _get_dataset_relative_path(self, data_mode: DataModes=None):
+		dataset_path_dict = {
+				'nih'     : 'NIH/images-224',
+				'rsna'    : 'RSNA/images-224',
+				'pc'      : 'PC/images-224',
+				'chex'    : 'CheX/CheXpert-v1.0-small',
+				'mimic'   : 'MIMIC/re_512_3ch',
+				'openai'  : 'Openi/NLMCXR_png',
+				'vinbrain': f'VinBrain/{data_mode.value}'
+				}
+		return dataset_path_dict.get(self.datasetName.value)
+
+	def _get_csv_relative_path(self, data_mode: DataModes=None):
+		csv_path_dict = {
+				'nih'     : 'NIH/Data_Entry_2017.csv',
+				'rsna'    : None,
+				'pc'      : 'PC/PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv',
+				'chex'    : f'CheX/CheXpert-v1.0-small/{data_mode.value}.csv',
+				'mimic'   : 'MIMIC/mimic-cxr-2.0.0-chexpert.csv.gz',
+				'openai'  : 'Openi/nlmcxr_dicom_metadata.csv',
+				'vinbrain': f'VinBrain/dicom/{data_mode.value}.csv',
+				}
+		return csv_path_dict.get(self.datasetName.value)
+
+	def _get_metadata_relative_path(self):
+		meta_data_dict = {'mimi': 'MIMIC/mimic-cxr-2.0.0-metadata.csv.gz'}
+		return meta_data_dict.get(self.datasetName.value)
+
 class DatasetSettings(pydantic.BaseModel):
-	datasetNames: list[DatasetNames] = pydantic.Field(default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT], description='list of dataset names. e.g. ["PC", "NIH", "CheX"]')
-	views: list[str] = pydantic.Field(default_factory = lambda : ['PA', 'AP'], description='list of views. e.g. ["PA", "AP"]')
-	non_null_samples: bool         = True
-	path            : pathlib.Path = pathlib.Path('./datasets')
-	data_mode       : DataModes    = DataModes.TRAIN
-	max_samples     : pydantic.conint(gt=0)         = 1000
-	train_test_ratio: pydantic.confloat(ge=0, le=1) = 0.7
+	data_mode        : DataModes     	  = DataModes.TRAIN
+	path_all_datasets: pathlib.Path       = pathlib.Path( './datasets' )
+	datasetInfoList  : list = pydantic.Field( default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT], description='list of dataset names. e.g. ["PC", "NIH", "CheX"]' )
+	views            : list[str]    = pydantic.Field(default_factory = lambda: ['PA', 'AP'])
+	non_null_samples : bool         = True
+	max_samples      : pydantic.conint(gt=0)         = 1000
+	train_test_ratio : pydantic.confloat(ge=0, le=1) = 0.7
+
+	@field_validator('path_all_datasets', mode='after')
+	def make_path_absolute(cls, v):
+		return v.resolve()
+
+	@field_validator('datasetInfoList', mode='after')
+	def post_process_info(cls, value: list[DatasetNames], values) -> list[DatasetInfo]:
+		"""	Convert the list of dataset names to a list of DatasetInfo objects	"""
+		return [ DatasetInfo(   path_all_datasets = values.path_all_datasets,
+								data_mode         = values.data_mode,
+								views 			  = values.views,
+								datasetName       = DatasetNames(dt))
+				 for dt in value]
 
 class TrainingSettings(pydantic.BaseModel):
 	criterion	      : LossFunctionOptions = LossFunctionOptions.BCE
@@ -30,14 +92,14 @@ class TrainingSettings(pydantic.BaseModel):
 	shuffle: bool = False
 	silent : bool = True
 
+
 class ModelSettings(pydantic.BaseModel):
-	name           : ModelWeightNames = ModelWeightNames.ALL_224
+	modelName            : ModelWeightNames = ModelWeightNames.ALL_224
 	chexpert_weights_path: pathlib.Path     = pathlib.Path("./pre_trained_models/chestxray/chexpert_baseline_model_weight.zip")
 
 	@property
 	def full_name(self) -> str:
-		return self.name.full_name
-
+		return self.modelName.full_name
 
 
 class SimulationSettings(pydantic.BaseModel):
@@ -59,7 +121,7 @@ class HyperParameterTuningSettings(pydantic.BaseModel):
 class OutputSettings(pydantic.BaseModel):
 	path: pathlib.Path = pathlib.Path('../outputs')
 
-	@validator('path', pre=False, always=True)
+	@field_validator('path', mode='after')
 	def make_path_absolute(cls, v):
 		return v.resolve()
 
@@ -129,7 +191,7 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 
 		return {k: v for k, v in vars(parsed_args).items() if v is not None}
 
-	def get_config(args_dict: argparse.Namespace) -> Settings | ValueError:
+	def get_config(args_dict: dict) -> Settings | ValueError:
 
 		# Loading the config.json file
 		config_dir = pathlib.Path(args_dict.get('config') or config_name).resolve()
@@ -157,6 +219,7 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 		# Convert the dictionary to a Namespace
 		config = Settings(**config_data)
 
+		config.dataset.path_all_datasets = pathlib.Path(config.dataset.path_all_datasets).resolve()
 		# # Updating the paths to their absolute path
 		# PATH_BASE = pathlib.Path(__file__).parent.parent.parent.parent
 		# args.DEFAULT_FINDING_FOLDER_NAME = f'{args.datasetName}-{args.modelName}'

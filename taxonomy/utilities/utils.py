@@ -320,7 +320,7 @@ class CalculateNewFindings:
 			for node in data.labels.nodes.non_null:
 				data = CalculateNewFindings.calculate_per_node( node=node, data=data, config=config, hyperparameters=hyperparameters, thresh_technique=x )
 
-		data.NEW.results = {key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', TechniqueNames.LOSS_BASED.name, 'hierarchy_penalty']}
+		data.NEW.results = { key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', TechniqueNames.LOSS_BASED.modelName, 'hierarchy_penalty'] }
 
 		return data
 
@@ -785,10 +785,10 @@ class TaxonomyXRV:
 	def get_data_and_model(config):
 
 		# Load the model
-		model = LoadModelXRV(config).load()
+		model = LoadModelXRV(config).load().model
 
 		# Load the data
-		LD = LoadChestXrayDatasets(config=config, pathologies_in_model=model.pathologies)
+		LD = LoadChestXrayDatasets( config=config )
 		LD.load()
 
 		return LD.train, LD.test, model, LD.dataset_full
@@ -797,7 +797,7 @@ class TaxonomyXRV:
 	def run_full_experiment(cls, methodName=TechniqueNames.LOSS_BASED, seed=10, **kwargs):
 
 		# Getting the user arguments
-		config = get_settings(jupyter=True, methodName=methodName.name, **kwargs)
+		config = get_settings( jupyter=True, **kwargs )
 
 		# Initializing the class
 		FE = cls(config=config, seed=seed)

@@ -18,50 +18,42 @@ from torch.utils.data import DataLoader as torch_DataLoader
 import torchxrayvision as xrv
 from taxonomy.utilities.params import DataModes, DatasetNames, ExperimentStageNames, HyperparameterNames, \
 	ThreshTechList
-from taxonomy.utilities.settings import Settings
+from taxonomy.utilities.settings import DatasetInfo, Settings
 
 USE_CUDA = torch.cuda.is_available()
 
 
-@dataclass
-class Labels:
-	LABEL_SET: Union[np.ndarray, pd.DataFrame]
-	classes  : set[str] = None
-
-	def __post_init__(self):
-
-		if isinstance(self.LABEL_SET, pd.DataFrame):
-			self.classes = set( self.LABEL_SET.columns.to_list() )
-		else:
-			assert self.classes is not None, "CLASSES must be provided if LABEL_SET is not a pandas DataFrame"
-			self.LABEL_SET = pd.DataFrame( self.LABEL_SET, columns=list( self.classes ) )
+# @dataclass
+# class Labels:
+# 	LABEL_SET: Union[np.ndarray, pd.DataFrame]
+# 	classes  : set[str] = None
+#
+# 	def __post_init__(self):
+#
+# 		if isinstance(self.LABEL_SET, pd.DataFrame):
+# 			self.classes = set( self.LABEL_SET.columns.to_list() )
+# 		else:
+# 			assert self.classes is not None, "CLASSES must be provided if LABEL_SET is not a pandas DataFrame"
+# 			self.LABEL_SET = pd.DataFrame( self.LABEL_SET, columns=list( self.classes ) )
 
 
 @dataclass
 class Nodes:
-	labels  : InitVar[Labels]
-	graph   :     nx.DiGraph = field(default_factory = nx.DiGraph)
-	classes :            set = field(default_factory = set)
-	NON_NULL:            set = field(default_factory = set)
-	IMPACTED:            set = field(default_factory = set)
-	_default_taxonomy:  dict = field(default_factory = dict)
+	labels  : InitVar[pd.DataFrame]
+	default_taxonomy_init: InitVar[dict] = None
+	graph   :     nx.DiGraph = field(init=False)
+	classes :            set = field(init=False)
+	NON_NULL:            set = field(init=False)
+	IMPACTED:            set = field(init=False)
+	_default_taxonomy:  dict = field(init=False)
 
-	def __post_init__(self, labels):
+	def __post_init__(self, labels: pd.DataFrame, default_taxonomy_init: dict = None):
 
-		if self._default_taxonomy is None:
-			self._default_taxonomy: dict = {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
+		self._default_taxonomy: dict = default_taxonomy_init or {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
 
-		self.classes = labels.classes
-		self._update_other_parameters(LABEL_SET=labels.LABEL_SET)
+		self.classes = set(labels.columns.to_list())
 
-	def _update_other_parameters(self, LABEL_SET: pd.DataFrame = None):
-
-		self.graph = self._construct_graph()
-
-		if LABEL_SET and LABEL_SET.size > 0:
-			self.NON_NULL = set(LABEL_SET.columns[LABEL_SET.count() > 0].to_list())
-
-		self.IMPACTED = self.NON_NULL.intersection( self.exist_in_taxonomy )
+		self._update_other_parameters(labels)
 
 	@property
 	def default_taxonomy(self) -> dict[str, set[str]]:
@@ -95,10 +87,24 @@ class Nodes:
 
 		return eit
 
+	@cached_property
+	def node_thresh_tuple(self):
+		return list(itertools.product(self.IMPACTED, ThreshTechList.members()))
+
+	def _update_other_parameters(self, labels: pd.DataFrame = None):
+
+		self.graph = self._construct_graph()
+
+		if labels and labels.size > 0:
+			self.NON_NULL = set( labels.columns[labels.count() > 0].to_list() )
+
+		self.IMPACTED = self.NON_NULL.intersection( self.exist_in_taxonomy )
+
 	def _construct_graph(self) -> nx.DiGraph:
 		graph = nx.DiGraph( self.taxonomy )
 		graph.add_nodes_from( self.classes )
 		return graph
+
 
 	def add_hyperparameters_to_node(self, parent_node: str, child_node: str, hyperparameter: dict[HyperparameterNames, float]):
 		for hp_name in hyperparameter:
@@ -112,10 +118,6 @@ class Nodes:
 
 	def get_hierarchy_penalty(self, node: str) -> float:
 		return self.graph.nodes[node].get('hierarchy_penalty', None)
-
-	@cached_property
-	def node_thresh_tuple(self):
-		return list(itertools.product(self.IMPACTED, ThreshTechList.members()))
 
 	def get_children_of(self, parent: str) -> set[str]:
 		return self.taxonomy.get( parent, set() )
@@ -192,15 +194,21 @@ class Nodes:
 @dataclass
 class Data:
 	dataset    : xrv.datasets.Dataset
-	data_loader: torch_DataLoader
-	labels     : Labels    = None
-	dataMode   : DataModes = None
-	nodes      : Nodes     = None
+	data_loader: torch_DataLoader = None
+	labels     : pd.DataFrame     = field(init=False)
+	nodes      : Nodes            = field(init=False)
 
 	def __post_init__(self):
-		self.labels = Labels(LABEL_SET=self.dataset.labels, classes=set(self.dataset.pathologies))
-		self.nodes  = Nodes(labels=self.labels)
+		self.labels = Data.create_labels_dataframe(self.dataset)
+		self.nodes  = Data.create_nodes(self.labels)
 
+	@staticmethod
+	def create_labels_dataframe(dataset: xrv.datasets.Dataset) -> pd.DataFrame:
+		return pd.DataFrame(dataset.labels, columns=dataset.pathologies)
+
+	@staticmethod
+	def create_nodes(labels: pd.DataFrame) -> Nodes:
+		return Nodes(labels=labels)
 
 @dataclass
 class Metrics:
@@ -242,13 +250,15 @@ class Findings:
 
 @dataclass
 class LoadChestXrayDatasets:
-	config: Settings = None
-	train : Data     = None
-	test  : Data     = None
-	nodes : Nodes    = None
-	dataset_full: xrv.datasets.Dataset = None
+	config : Settings
+	dataset: xrv.datasets.Dataset = None
+	labels : pd.DataFrame         = None
+	nodes  : Nodes                = None
+	train  : Data                 = None
+	test   : Data                 = None
 
-	def load_raw_database(self):
+	@staticmethod
+	def load_raw_database(datasetInfo: DatasetInfo):
 		"""
 			# RSNA Pneumonia Detection Challenge. https://pubs.rsna.org/doi/full/10.1148/ryai.2019180041
 				Augmenting the National Institutes of Health Chest Radiograph Dataset with Expert
@@ -314,55 +324,10 @@ class LoadChestXrayDatasets:
 				NIH data can be downloaded here:	https://academictorrents.com/details/e615d3aebce373f1dc8bd9d11064da55bdadede0
 		"""
 
-		def _path_csv_files() -> pathlib.Path:
-			csv_path_dict = {
-					DatasetNames.NIH     : 'NIH/Data_Entry_2017.csv',
-					DatasetNames.RSNA    : None,
-					DatasetNames.PC      : 'PC/PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv',
-					DatasetNames.CheX    : f'CheX/CheXpert-v1.0-small/{self.config.dataset_data_mode}.csv',
-					DatasetNames.MIMIC   : 'MIMIC/mimic-cxr-2.0.0-chexpert.csv.gz',
-					DatasetNames.Openi   : 'Openi/nlmcxr_dicom_metadata.csv',
-					DatasetNames.NLMTB   : None,
-					DatasetNames.VinBrain: f'VinBrain/dicom/{self.config.dataset_data_mode}.csv',
-					}
-
-			return self.config.PATH_DATASETS / csv_path_dict.get(self.config.datasetName)
-
-		def _path_meta_data_csv_files() -> pathlib.Path | None:
-			meta_csv_path_dict = dict(MIMIC='MIMIC/mimic-cxr-2.0.0-metadata.csv.gz') # I don't have this csv file
-			return self.config.PATH_DATASETS / meta_csv_path_dict.get(self.config.datasetName)
-
-		def _path_dataset() -> pathlib.Path:
-			dataset_dir_dict = {
-					DatasetNames.NIH      : 'NIH/images-224',
-					DatasetNames.RSNA     : None,
-					DatasetNames.PC       : 'PC/images-224',
-					DatasetNames.CheX     : 'CheX/CheXpert-v1.0-small',
-					DatasetNames.MIMIC    : 'MIMIC/re_512_3ch',
-					DatasetNames.Openi    : 'Openi/NLMCXR_png',
-					DatasetNames.NLMTB    : None,
-					DatasetNames.VinBrain : f'VinBrain/{self.config.dataset_data_mode}'
-					}
-
-			return self.config.PATH_DATASETS / dataset_dir_dict.get(self.config.datasetName)
-
-		imgpath   = _path_dataset()
-		views     = self.config.views
-		csvpath   = _path_csv_files()
 		transform = torchvision.transforms.Compose([xrv.datasets.XRayCenterCrop(), xrv.datasets.XRayResizer(size = 224, engine = "cv2")])
 
-		params_config = {
-				DatasetNames.NIH       : dict(imgpath=imgpath, views=views),
-				DatasetNames.PC        : dict(imgpath=imgpath, views=views),
-				DatasetNames.CHEXPERT  : dict(imgpath=imgpath, views=views, transform=transform, csvpath=csvpath),
-				DatasetNames.MIMIC     : dict(imgpath=imgpath, views=views, transform=transform, csvpath=csvpath, metacsvpath=_path_meta_data_csv_files()),
-				DatasetNames.Openi     : dict(imgpath=imgpath, views=views, transform=transform),
-				DatasetNames.VinBrain  : dict(imgpath=imgpath, views=views, csvpath=csvpath),
-				DatasetNames.RSNA      : dict(imgpath=imgpath, views=views, transform=transform),
-				DatasetNames.NIH_Google: dict(imgpath=imgpath, views=views)
-				}
-
-		dataset_config = {
+		datasetInfo.params_config.update( {'transform': transform} )
+		dataset_getter = {
 				DatasetNames.NIH       : xrv.datasets.NIH_Dataset,
 				DatasetNames.PC        : xrv.datasets.PC_Dataset,
 				DatasetNames.CHEXPERT  : xrv.datasets.CheX_Dataset,
@@ -372,35 +337,47 @@ class LoadChestXrayDatasets:
 				DatasetNames.RSNA      : xrv.datasets.RSNA_Pneumonia_Dataset,
 				DatasetNames.NIH_Google: xrv.datasets.NIH_Google_Dataset
 				}
+		return dataset_getter[datasetInfo.datasetName](**datasetInfo.params_config)
 
-		self.dataset_full = dataset_config.get( self.config.datasetName )( **params_config.get( self.config.datasetName ) )
-		self.nodes     = NodeData( set( self.dataset_full.pathologies ) )
+	@staticmethod
+	def post_process_one_dataset(config: Settings, dataset: xrv.datasets.Dataset, datasetInfo: DatasetInfo):
 
-	def relabel_raw_database(self):
-		from taxonomy.utilities.model import LoadModelXRV
+		labels = Data.create_labels_dataframe(dataset)
+		nodes  = Data.create_nodes(labels)
 
-		# Adding the PatientID if it doesn't exist
-		# if "patientid" not in self.dataset_full.csv:
-		# 	self.dataset_full.csv["patientid"] = [ f"{self.dataset_full.__class__.__name__}-{i}"
-		# 	for i in range(len(self.dataset_full)) ]
+		def relabel_raw_database():
+			nonlocal dataset, labels, nodes
 
-		# Filtering the dataset_full
-		# self.dataset_full.csv = self.dataset_full.csv[self.dataset_full.csv['Frontal/Lateral'] == 'Frontal'].reset_index(drop=False)
+			from taxonomy.utilities.model import LoadModelXRV
 
-		# Aligning labels to have the same order as the pathologies' argument.
-		xrv.datasets.relabel_dataset( pathologies=LoadModelXRV.model_classes(self.config), dataset=self.dataset_full, silent=self.config.silent )
+			# Adding the PatientID if it doesn't exist
+			# if "patientid" not in self.dataset.csv:
+			# 	self.dataset.csv["patientid"] = [ f"{self.dataset.__class__.__name__}-{i}"
+			# 	for i in range(len(self.dataset)) ]
 
-	def update_empty_parent_class_based_on_its_children_classes(self):
+			# Filtering the data.dataset
+			# self.dataset.csv = self.dataset.csv[self.dataset.csv['Frontal/Lateral'] == 'Frontal'].reset_index(drop=False)
 
-		labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
+			# TODO: check to make sure the value of dataset inside data is changed
+			# Aligning labels to have the same order as the pathologies' argument.
+			xrv.datasets.relabel_dataset( pathologies=LoadModelXRV.model_classes(config), dataset=dataset, silent=config.silent )
 
-		for parent, children in self.nodes.nodes.taxonomy.items():
+			labels = Data.create_labels_dataframe(dataset)
+			nodes  = Data.create_nodes(labels)
 
-			# Checking if the parent class existed in the original pathologies in the dataset_full.
-			# Will only replace its values if all its labels are NaN
-			if labels[parent].value_counts().values.shape[0] == 0:
+		def update_empty_parent_class_based_on_its_children_classes() -> pd.DataFrame:
+			nonlocal dataset, labels, nodes
 
-				print(f"Parent class: {parent} is not in the dataset_full. replacing its true values according to its children presence.")
+			# Updating the empty parent labels if at least one child label exist
+			if datasetInfo.datasetName not in [DatasetNames.PC , DatasetNames.NIH]:
+				return labels
+
+			for parent, children in nodes.taxonomy.items():
+
+				if labels[parent].value_counts().values.shape[0] != 0:
+					continue
+
+				print(f"Parent class: {parent} is not labeled. Replacing its true values according to its children presence.")
 
 				# Initializing the parent label to 0
 				labels[parent] = 0
@@ -408,60 +385,72 @@ class LoadChestXrayDatasets:
 				# If at-least one of the children has a label of 1, then the parent label is 1
 				labels[parent][ labels[children].sum(axis=1) > 0 ] = 1
 
-		self.dataset_full.labels = labels.values
+		def selecting_non_null_samples(labels: pd.DataFrame):
+			nonlocal dataset, labels, nodes
 
-	def train_test_split(self):
-		labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
+			"""  Selecting non-null samples for impacted pathologies  """
+			for parent in nodes.taxonomy:
 
-		idx_train = labels.sample(frac=self.config.train_test_ratio).index
-		d_train = xrv.datasets.SubsetDataset( self.dataset_full, idxs=idx_train )
+				# Extracting the samples with a non-null value for the parent truth label
+				labels  = labels[ ~labels[parent].isna() ]
+				dataset = xrv.datasets.SubsetDataset(dataset, idxs=labels.index)
+
+				# Extracting the samples, where for each parent at least one child has a non-null truth label
+				labels  = Data.create_labels_dataframe(dataset)
+				labels  = labels[(~labels[ nodes.taxonomy[parent]].isna()).sum( axis=1 ) > 0]
+				dataset = xrv.datasets.SubsetDataset(dataset, idxs=labels.index)
+
+		# Relabeling the raw database with respect to model pathologies
+		relabel_raw_database()
+
+		# Updating the empty parent labels with the child labels
+
+		labels = update_empty_parent_class_based_on_its_children_classes()
+
+		# Selecting non-null samples for impacted pathologies
+		selecting_non_null_samples(labels)
+
+		return dataset
+
+	@staticmethod
+	def train_test_split(config: Settings, dataset: xrv.datasets.Dataset) -> tuple[xrv.datasets.Dataset, xrv.datasets.Dataset]:
+
+		# Creating the labels dataframe
+		labels = Data.create_labels_dataframe(dataset)
+
+		# Splitting the data.dataset into train and test
+		idx_train = labels.sample(frac=config.dataset.train_test_ratio).index
+		dataset_train = xrv.datasets.SubsetDataset( dataset, idxs=idx_train )
 
 		idx_test = labels.drop(idx_train).index
-		d_test = xrv.datasets.SubsetDataset( self.dataset_full, idxs=idx_test )
+		dataset_test = xrv.datasets.SubsetDataset( dataset, idxs=idx_test )
 
-		return d_train, d_test
+		return dataset_train, dataset_test
 
-	def _selecting_non_null_samples(self):
-		"""  Selecting non-null samples for impacted pathologies  """
+	@staticmethod
+	def load_one_dataset(config: Settings, datasetInfo: DatasetInfo):
 
-		labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
+		# Loading using torchxrayvision package
+		dataset = LoadChestXrayDatasets.load_raw_database(datasetInfo=datasetInfo)
 
-		for parent in self.nodes.nodes.taxonomy:
+		# Post-processing the data.dataset
+		dataset = LoadChestXrayDatasets.post_process_one_dataset(config=config, dataset=dataset, datasetInfo=datasetInfo)
 
-			# Extracting the samples with a non-null value for the parent truth label
-			labels  = labels[ ~labels[parent].isna() ]
-			self.dataset_full = xrv.datasets.SubsetDataset( self.dataset_full, idxs=labels.index )
-			labels  = pd.DataFrame( self.dataset_full.labels, columns=self.dataset_full.pathologies )
-
-			# Extracting the samples, where for each parent, at least one of their children has a non-null truth label
-			labels  = labels[(~labels[ self.nodes.nodes.taxonomy[parent]].isna()).sum( axis=1 ) > 0]
-			self.dataset_full = xrv.datasets.SubsetDataset( self.dataset_full, idxs=labels.index )
+		# Splitting the data.dataset into train and test
+		return LoadChestXrayDatasets.train_test_split(config=config, dataset=dataset)
 
 	def load(self):
 
-		# Loading the data using torchxrayvision package
-		self.load_raw_database()
+		for datasetInfo in self.config.dataset.datasetInfoList:
+			dataset_train, dataset_test = self.load_one_dataset(config=self.config, datasetInfo=datasetInfo)
 
-		# Relabeling it with respect to the model pathologies
-		self.relabel_raw_database()
+			# Creating the data_loader
+			data_loader_args = {key: getattr(self.config, key) for key in ['batch_size', 'shuffle', 'num_workers']}
+			data_loader_train = torch.utils.data.DataLoader(dataset_train, pin_memory=USE_CUDA , **data_loader_args)
+			data_loader_test  = torch.utils.data.DataLoader(dataset_test , pin_memory=USE_CUDA , **data_loader_args )
 
-		# Updating the empty parent labels with the child labels
-		if self.config.datasetName in [DatasetNames.PC , DatasetNames.NIH]:
-			self.update_empty_parent_class_based_on_its_children_classes()
-
-		# Selecting non-null samples for impacted pathologies
-		self._selecting_non_null_samples()
-
-		#separate train & test
-		dataset_train, dataset_test = self.train_test_split()
-
-		# Creating the data_loader
-		data_loader_args = {key: getattr(self.config, key) for key in ['batch_size', 'shuffle', 'num_workers']}
-		data_loader_train = torch.utils.data.DataLoader(dataset_train, pin_memory=USE_CUDA , **data_loader_args)
-		data_loader_test  = torch.utils.data.DataLoader(dataset_test , pin_memory=USE_CUDA , **data_loader_args )
-
-		self.train = Data(dataset=dataset_train, data_loader=data_loader_train, dataMode=DataModes.TRAIN)
-		self.test  = Data(dataset=dataset_test , data_loader=data_loader_test , dataMode=DataModes.TEST )
+			self.train = Data( dataset=dataset_train, data_loader=data_loader_train )
+			self.test  = Data( dataset=dataset_test, data_loader=data_loader_test )
 
 	@property
 	def xrv_default_pathologies(self):

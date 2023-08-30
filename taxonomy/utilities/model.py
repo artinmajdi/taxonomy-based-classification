@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 import torchxrayvision as xrv
 from taxonomy.utilities.params import DataModes, ModelWeightNames
-
+from taxonomy.utilities.settings import Settings
 
 USE_CUDA = torch.cuda.is_available()
 
@@ -66,48 +66,36 @@ def extract_feature_maps(config: argparse.Namespace, data_mode: DataModes=DataMo
 
 @dataclass
 class LoadModelXRV:
-	config               : argparse.Namespace
-	model                : torch.nn.Module = field(default_factory = lambda: None)
-	chexpert_weights_path: pathlib.Path    = field(default_factory = lambda: None)
-	modelName            : ModelWeightNames      = field(default_factory = lambda: ModelWeightNames.ALL_224)
+	config: Settings
+	model : torch.nn.Module = None
 
-	def __post_init__(self):
-		self.modelName            : ModelWeightNames   = getattr(self.config, 'modelName', ModelWeightNames.ALL_224)
-		self.chexpert_weights_path: pathlib.Path = getattr(self.config, 'PATH_CHEXPERT_WEIGHTS', None)
+	def load(self, op_threshes: bool=False):
 
-	def load(self, op_threshes: bool=False) -> torch.nn.Module:
-		
-		def _get_model():
+		modelName = self.config.model.modelName
 
-			if 'baseline' in self.modelName.value:
+		def _get_model() -> torch.nn.Module:
+			if modelName == ModelWeightNames.BASELINE_JFHEALTHCARE:
+				return xrv.baseline_models.jfhealthcare.DenseNet()
 
-				if self.modelName is ModelWeightNames.BASELINE_JFHEALTHCARE:
-					return xrv.baseline_models.jfhealthcare.DenseNet()
+			elif modelName == ModelWeightNames.BASELINE_CHEX:
+				return xrv.baseline_models.chexpert.DenseNet(weights_zip=self.config.model.chexpert_weights_path)
 
-				elif self.modelName is ModelWeightNames.BASELINE_CHEX:
-					return xrv.baseline_models.chexpert.DenseNet(weights_zip=self.chexpert_weights_path)
+			elif modelName.value.startswith('resnet'):
+				return xrv.models.ResNet(weights=modelName.full_name, apply_sigmoid=False)
 
-			else:
+			elif modelName.value.startswith('densenet'):
+				return xrv.models.DenseNet(weights=modelName.full_name, apply_sigmoid=False)
 
-				if 'resnet' in self.modelName.value:
-					return xrv.models.ResNet(weights=self.modelName.value, apply_sigmoid=False)
+			raise NotImplementedError(f"Model {modelName} not implemented")
 
-				else:
-					return xrv.models.DenseNet(weights=self.modelName.value, apply_sigmoid=False)
-		
-		model = _get_model()
+		self.model = _get_model()
 
-		if not op_threshes:
-			model.op_threshes = None
+		self.model.op_threshes = xrv.models.model_urls[modelName.value]['op_threshes'] if op_threshes else None
 
 		if USE_CUDA:
-			model.cuda()
-		
-		return model
-	
-	@property
-	def serve_op_threshes(self):
-		return xrv.models.model_urls[self.modelName.value.lower()]['op_threshes']
+			self.model.cuda()
+
+		return self
 	
 	@staticmethod
 	def model_classes(config: argparse.Namespace):

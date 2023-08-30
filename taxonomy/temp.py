@@ -1,6 +1,3 @@
-import json
-import pathlib
-
 from taxonomy.utilities.settings import get_settings
 
 # config_dir = pathlib.Path('config.json').resolve()

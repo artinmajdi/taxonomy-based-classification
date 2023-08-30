@@ -28,17 +28,16 @@ class ExperimentStageNames(enum.Enum):
 
 @members
 class DatasetNames(enum.Enum):
-	PC         = 'PC'
-	NIH        = 'NIH'
-	CHEXPERT   = 'CheX'
-	RSNA       = 'RSNA'
-	MIMIC      = 'MIMIC'
-	ALL        = 'ALL'
-	VINBRAIN   = 'VinBrain'
-	OPENI      = 'Openi'
-	NIH_GOOGLE = 'NIH_Google'
-	
-	
+	PC         = 'pc'
+	NIH        = 'nih'
+	CHEXPERT   = 'chex'
+	RSNA       = 'rsna'
+	MIMIC      = 'mimic'
+	ALL        = 'all'
+	VINBRAIN   = 'vinbrain'
+	OPENI      = 'openi'
+	NIH_GOOGLE = 'nih_google'
+
 @members
 class ThreshTechList(enum.Enum):
 	DEFAULT          = 'DEFAULT'

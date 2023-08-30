@@ -94,8 +94,8 @@ class Tables:
 			F1  = pd.DataFrame(columns = columns)
 			ACC = pd.DataFrame(columns = columns)
 
-			LOGIT    = TechniqueNames.LOGIT_BASED.name
-			LOSS     = TechniqueNames.LOSS_BASED.name
+			LOGIT    = TechniqueNames.LOGIT_BASED.modelName
+			LOSS     = TechniqueNames.LOSS_BASED.modelName
 			BASELINE = TechniqueNames.BASELINE.name
 
 			for dt in DatasetNames.members():
