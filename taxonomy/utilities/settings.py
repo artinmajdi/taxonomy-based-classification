@@ -92,7 +92,6 @@ class TrainingSettings(pydantic.BaseModel):
 	shuffle: bool = False
 	silent : bool = True
 
-
 class ModelSettings(pydantic.BaseModel):
 	modelName            : ModelWeightNames = ModelWeightNames.ALL_224
 	chexpert_weights_path: pathlib.Path     = pathlib.Path("./pre_trained_models/chestxray/chexpert_baseline_model_weight.zip")
@@ -100,7 +99,6 @@ class ModelSettings(pydantic.BaseModel):
 	@property
 	def full_name(self) -> str:
 		return self.modelName.full_name
-
 
 class SimulationSettings(pydantic.BaseModel):
 	findings_original: SimulationOptions = SimulationOptions.RUN_SIMULATION
@@ -138,7 +136,6 @@ class Settings(pydantic.BaseSettings):
 		use_enum_values      = False
 		case_sensitive       = False
 		str_strip_whitespace = True
-
 
 def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings | ValueError:
 
@@ -228,3 +225,8 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 
 	# Updating the config file
 	return  get_config(args_dict=parse_args())
+
+if __name__ == '__main__':
+	config = get_settings()
+
+	print(config)

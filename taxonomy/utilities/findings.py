@@ -20,8 +20,8 @@ from taxonomy.utilities.utils import TaxonomyXRV
 
 def calculating_threshold_and_metrics(findings: Findings) -> Metrics:
 
-	classes = findings.data.nodeData.nodes.classes
-	metrics = Metrics(pathologies=classes)
+	classes = findings.data.nodes.classes
+	metrics = Metrics(classes=classes)
 
 	def calculating_threshold_and_metrics_per_node(node: str, findings: Findings, thresh_technique: ThreshTechList) -> Findings:
 
@@ -137,7 +137,7 @@ class Tables:
 	def get_dataset_unfiltered(**kwargs):
 		config = get_settings(**kwargs)
 		LD = LoadChestXrayDatasets( config=config )
-		LD.load_raw_database()
+		LD.load_raw_database(datasetInfo=config.dataset.datasetInfoList[0])
 		LD.relabel_raw_database()
 		LD.update_empty_parent_class_based_on_its_children_classes()
 		return LD

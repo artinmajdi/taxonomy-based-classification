@@ -1,14 +1,12 @@
-import argparse
 import itertools
 import json
 import pathlib
 import pickle
 from dataclasses import dataclass, field, InitVar
 from functools import cached_property, singledispatch, wraps
-from typing import Any, Optional, Union
+from typing import Any, Optional, Self, Tuple, Union
 
 import networkx as nx
-import numpy as np
 import pandas as pd
 import torch
 import torchvision
@@ -16,12 +14,11 @@ from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader as torch_DataLoader
 
 import torchxrayvision as xrv
-from taxonomy.utilities.params import DataModes, DatasetNames, ExperimentStageNames, HyperparameterNames, \
+from taxonomy.utilities.params import DatasetNames, ExperimentStageNames, HyperparameterNames, \
 	ThreshTechList
 from taxonomy.utilities.settings import DatasetInfo, Settings
 
 USE_CUDA = torch.cuda.is_available()
-
 
 # @dataclass
 # class Labels:
@@ -35,7 +32,6 @@ USE_CUDA = torch.cuda.is_available()
 # 		else:
 # 			assert self.classes is not None, "CLASSES must be provided if LABEL_SET is not a pandas DataFrame"
 # 			self.LABEL_SET = pd.DataFrame( self.LABEL_SET, columns=list( self.classes ) )
-
 
 @dataclass
 class Nodes:
@@ -201,6 +197,7 @@ class Data:
 	def __post_init__(self):
 		self.labels = Data.create_labels_dataframe(self.dataset)
 		self.nodes  = Data.create_nodes(self.labels)
+		self.data_loader =
 
 	@staticmethod
 	def create_labels_dataframe(dataset: xrv.datasets.Dataset) -> pd.DataFrame:
@@ -209,6 +206,7 @@ class Data:
 	@staticmethod
 	def create_nodes(labels: pd.DataFrame) -> Nodes:
 		return Nodes(labels=labels)
+
 
 @dataclass
 class Metrics:
@@ -248,17 +246,23 @@ class Findings:
 		self.modelOutputs = ModelOutputs()
 		self.metrics      = Metrics( classes=self.data.labels.classes )
 
+
 @dataclass
 class LoadChestXrayDatasets:
-	config : Settings
-	dataset: xrv.datasets.Dataset = None
-	labels : pd.DataFrame         = None
-	nodes  : Nodes                = None
-	train  : Data                 = None
-	test   : Data                 = None
+	config     : Settings
+	datasetInfo: DatasetInfo
+	dataset    : xrv.datasets.Dataset = None
+	labels     : pd.DataFrame         = None
+	nodes      : Nodes                = None
+	train      : Data                 = None
+	test       : Data                 = None
 
-	@staticmethod
-	def load_raw_database(datasetInfo: DatasetInfo):
+	def __post_init__(self):
+		self.labels = Data.create_labels_dataframe(self.dataset)
+		self.nodes  = Data.create_nodes(self.labels)
+		self.load_raw_database().relabel_raw_database()
+
+	def load_raw_database(self) -> Self:
 		"""
 			# RSNA Pneumonia Detection Challenge. https://pubs.rsna.org/doi/full/10.1148/ryai.2019180041
 				Augmenting the National Institutes of Health Chest Radiograph Dataset with Expert
@@ -325,8 +329,8 @@ class LoadChestXrayDatasets:
 		"""
 
 		transform = torchvision.transforms.Compose([xrv.datasets.XRayCenterCrop(), xrv.datasets.XRayResizer(size = 224, engine = "cv2")])
+		self.datasetInfo.params_config.update( {'transform': transform} )
 
-		datasetInfo.params_config.update( {'transform': transform} )
 		dataset_getter = {
 				DatasetNames.NIH       : xrv.datasets.NIH_Dataset,
 				DatasetNames.PC        : xrv.datasets.PC_Dataset,
@@ -337,120 +341,114 @@ class LoadChestXrayDatasets:
 				DatasetNames.RSNA      : xrv.datasets.RSNA_Pneumonia_Dataset,
 				DatasetNames.NIH_Google: xrv.datasets.NIH_Google_Dataset
 				}
-		return dataset_getter[datasetInfo.datasetName](**datasetInfo.params_config)
+		self.dataset = dataset_getter[self.datasetInfo.datasetName](**self.datasetInfo.params_config)
+		return self
 
-	@staticmethod
-	def post_process_one_dataset(config: Settings, dataset: xrv.datasets.Dataset, datasetInfo: DatasetInfo):
+	def relabel_raw_database(self) -> Self:
+		from taxonomy.utilities.model import LoadModelXRV
 
-		labels = Data.create_labels_dataframe(dataset)
-		nodes  = Data.create_nodes(labels)
+		# Adding the PatientID if it doesn't exist
+		# if "patientid" not in self.dataset.csv:
+		# 	self.dataset.csv["patientid"] = [ f"{self.dataset.__class__.__name__}-{i}"
+		# 	for i in range(len(self.dataset)) ]
+		# Filtering the data.dataset
+		# self.dataset.csv = self.dataset.csv[self.dataset.csv['Frontal/Lateral'] == 'Frontal'].reset_index(drop=False)
 
-		def relabel_raw_database():
-			nonlocal dataset, labels, nodes
+		# Aligning labels to have the same order as the pathologies' argument.
+		xrv.datasets.relabel_dataset( pathologies=LoadModelXRV.model_classes(self.config), dataset=self.dataset, silent=self.config.training.silent )
+		self.labels = Data.create_labels_dataframe(self.dataset)
+		self.nodes  = Data.create_nodes(self.labels)
 
-			from taxonomy.utilities.model import LoadModelXRV
+		return self
 
-			# Adding the PatientID if it doesn't exist
-			# if "patientid" not in self.dataset.csv:
-			# 	self.dataset.csv["patientid"] = [ f"{self.dataset.__class__.__name__}-{i}"
-			# 	for i in range(len(self.dataset)) ]
+	def post_process_one_dataset(self) -> Self:
 
-			# Filtering the data.dataset
-			# self.dataset.csv = self.dataset.csv[self.dataset.csv['Frontal/Lateral'] == 'Frontal'].reset_index(drop=False)
-
-			# TODO: check to make sure the value of dataset inside data is changed
-			# Aligning labels to have the same order as the pathologies' argument.
-			xrv.datasets.relabel_dataset( pathologies=LoadModelXRV.model_classes(config), dataset=dataset, silent=config.silent )
-
-			labels = Data.create_labels_dataframe(dataset)
-			nodes  = Data.create_nodes(labels)
-
-		def update_empty_parent_class_based_on_its_children_classes() -> pd.DataFrame:
-			nonlocal dataset, labels, nodes
+		def update_empty_parent_class_based_on_its_children_classes() -> Optional:
 
 			# Updating the empty parent labels if at least one child label exist
-			if datasetInfo.datasetName not in [DatasetNames.PC , DatasetNames.NIH]:
-				return labels
+			if self.datasetInfo.datasetName not in [DatasetNames.PC , DatasetNames.NIH]:
+				return None
 
-			for parent, children in nodes.taxonomy.items():
+			for parent, children in self.nodes.taxonomy.items():
 
-				if labels[parent].value_counts().values.shape[0] != 0:
+				if self.labels[parent].value_counts().values.shape[0] != 0:
 					continue
 
 				print(f"Parent class: {parent} is not labeled. Replacing its true values according to its children presence.")
 
 				# Initializing the parent label to 0
-				labels[parent] = 0
+				self.labels[parent] = 0
 
 				# If at-least one of the children has a label of 1, then the parent label is 1
-				labels[parent][ labels[children].sum(axis=1) > 0 ] = 1
+				self.labels[parent][ self.labels[children].sum(axis=1) > 0 ] = 1
 
-		def selecting_non_null_samples(labels: pd.DataFrame):
-			nonlocal dataset, labels, nodes
+		def selecting_non_null_samples():
 
-			"""  Selecting non-null samples for impacted pathologies  """
-			for parent in nodes.taxonomy:
+			for parent in self.nodes.taxonomy:
 
 				# Extracting the samples with a non-null value for the parent truth label
-				labels  = labels[ ~labels[parent].isna() ]
-				dataset = xrv.datasets.SubsetDataset(dataset, idxs=labels.index)
+				self.labels  = self.labels[ ~self.labels[parent].isna() ]
+				self.dataset = xrv.datasets.SubsetDataset(self.dataset, idxs=self.labels.index)
 
 				# Extracting the samples, where for each parent at least one child has a non-null truth label
-				labels  = Data.create_labels_dataframe(dataset)
-				labels  = labels[(~labels[ nodes.taxonomy[parent]].isna()).sum( axis=1 ) > 0]
-				dataset = xrv.datasets.SubsetDataset(dataset, idxs=labels.index)
-
-		# Relabeling the raw database with respect to model pathologies
-		relabel_raw_database()
+				self.labels  = Data.create_labels_dataframe(self.dataset)
+				self.labels  = self.labels[(~self.labels[ self.nodes.taxonomy[parent]].isna()).sum( axis=1 ) > 0]
+				self.dataset = xrv.datasets.SubsetDataset(self.dataset, idxs=self.labels.index)
 
 		# Updating the empty parent labels with the child labels
-
-		labels = update_empty_parent_class_based_on_its_children_classes()
+		update_empty_parent_class_based_on_its_children_classes()
 
 		# Selecting non-null samples for impacted pathologies
-		selecting_non_null_samples(labels)
+		selecting_non_null_samples()
 
-		return dataset
+		return self
 
 	@staticmethod
-	def train_test_split(config: Settings, dataset: xrv.datasets.Dataset) -> tuple[xrv.datasets.Dataset, xrv.datasets.Dataset]:
+	def train_test_split(config, dataset) -> Tuple[xrv.datasets.Dataset, xrv.datasets.Dataset]:
 
 		# Creating the labels dataframe
 		labels = Data.create_labels_dataframe(dataset)
 
 		# Splitting the data.dataset into train and test
-		idx_train = labels.sample(frac=config.dataset.train_test_ratio).index
+		idx_train     = labels.sample(frac = config.dataset.train_test_ratio).index
 		dataset_train = xrv.datasets.SubsetDataset( dataset, idxs=idx_train )
 
-		idx_test = labels.drop(idx_train).index
+		idx_test     = labels.drop(idx_train).index
 		dataset_test = xrv.datasets.SubsetDataset( dataset, idxs=idx_test )
 
 		return dataset_train, dataset_test
 
-	@staticmethod
-	def load_one_dataset(config: Settings, datasetInfo: DatasetInfo):
-
-		# Loading using torchxrayvision package
-		dataset = LoadChestXrayDatasets.load_raw_database(datasetInfo=datasetInfo)
+	def _load_one_dataset(self) -> Tuple[xrv.datasets.Dataset, xrv.datasets.Dataset]:
 
 		# Post-processing the data.dataset
-		dataset = LoadChestXrayDatasets.post_process_one_dataset(config=config, dataset=dataset, datasetInfo=datasetInfo)
+		self.post_process_one_dataset()
 
 		# Splitting the data.dataset into train and test
-		return LoadChestXrayDatasets.train_test_split(config=config, dataset=dataset)
+		return LoadChestXrayDatasets.train_test_split(config=self.config, dataset=self.dataset)
 
-	def load(self):
+	@classmethod
+	def load(cls, config: Settings) -> Tuple[Data, Data]:
 
-		for datasetInfo in self.config.dataset.datasetInfoList:
-			dataset_train, dataset_test = self.load_one_dataset(config=self.config, datasetInfo=datasetInfo)
+		dt_train_list = []
+		dt_test_list  = []
+		for i, datasetInfo in enumerate(config.dataset.datasetInfoList):
+			dt_train_list[i], dt_test_list[i] = cls(config=config, datasetInfo=datasetInfo)._load_one_dataset()
 
-			# Creating the data_loader
-			data_loader_args = {key: getattr(self.config, key) for key in ['batch_size', 'shuffle', 'num_workers']}
-			data_loader_train = torch.utils.data.DataLoader(dataset_train, pin_memory=USE_CUDA , **data_loader_args)
-			data_loader_test  = torch.utils.data.DataLoader(dataset_test , pin_memory=USE_CUDA , **data_loader_args )
+		dataset_train = xrv.datasets.Merge_Dataset( datasets = dt_train_list )
+		dataset_test  = xrv.datasets.Merge_Dataset( datasets = dt_test_list  )
 
-			self.train = Data( dataset=dataset_train, data_loader=data_loader_train )
-			self.test  = Data( dataset=dataset_test, data_loader=data_loader_test )
+		# Creating the data_loader
+		dataloader_train = LoadChestXrayDatasets.create_dataloader( config, dataset_train )
+		dataloader_test  = LoadChestXrayDatasets.create_dataloader( config, dataset_test )
+
+		train = Data( dataset = dataset_train, data_loader = dataloader_train)
+		test  = Data( dataset = dataset_test , data_loader = dataloader_test )
+		return train, test
+
+	@staticmethod
+	def create_dataloader(config, dataset):
+		data_loader_args = { key: getattr( config, key ) for key in ['batch_size', 'shuffle', 'num_workers'] }
+		return torch.utils.data.DataLoader( dataset, pin_memory=USE_CUDA, **data_loader_args )
 
 	@property
 	def xrv_default_pathologies(self):
@@ -467,6 +465,7 @@ class LoadChestXrayDatasets:
 	def available_datasets(self):
 		return [DatasetNames.CHEXPERT, DatasetNames.NIH, DatasetNames.PC]
 
+
 def check_file_exist(func):
 	@wraps(func)
 	def wrapper(self, file_path: Union[str, pathlib.Path], *args, **kwargs):
@@ -475,12 +474,14 @@ def check_file_exist(func):
 		return func(self, file_path, *args, **kwargs)
 	return wrapper
 
+
 def create_file_path_if_not_exist(func):
 	@wraps(func)
 	def wrapper(self, file_path: Union[str, pathlib.Path], *args, **kwargs):
 		(file_path := pathlib.Path(file_path)).parent.mkdir(parents=True, exist_ok=True)
 		return func(self, file_path, *args, **kwargs)
 	return wrapper
+
 
 class LoadSaveFile:
 
@@ -547,3 +548,10 @@ class LoadSaveFile:
 
 		for fmt in (fmt if fmt.startswith('.') else f'.{fmt}' for fmt in file_format):
 			data.savefig(file_path.with_suffix(fmt), format=fmt.lstrip('.'), dpi=300, **kwargs)
+
+
+if __name__ == '__main__':
+	config = Settings()
+	Train, Test = LoadChestXrayDatasets.load(config)
+
+	print('temp')
