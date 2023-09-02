@@ -1,1 +1,0 @@
-from taxonomy._version import __version__

@@ -10,6 +10,9 @@ def members(cls):
 	# Add the members class method
 	cls.members = classmethod(lambda cls2: list(cls2.__members__))
 
+	# Adding all options in a list
+	cls.all = classmethod(lambda cls2: [cls2[n] for n in list(cls2.__members__)])
+
 	# cls.values = classmethod(lambda cls2: [n.value for n in cls2.__members__])
 	
 	# Make the class iterable
@@ -37,6 +40,7 @@ class DatasetNames(enum.Enum):
 	VINBRAIN   = 'vinbrain'
 	OPENI      = 'openi'
 	NIH_GOOGLE = 'nih_google'
+
 
 @members
 class ThreshTechList(enum.Enum):
@@ -78,6 +82,7 @@ class ModelWeightNames(enum.Enum):
 		obj.full_name = full_name
 		return obj
 
+
 @members
 class LossFunctionOptions(enum.Enum):
 	BCE = 'binary_cross_entropy'
@@ -91,6 +96,7 @@ class LossFunctionOptions(enum.Enum):
 			'cross_entropy'       : torch.nn.CrossEntropyLoss(reduction = 'none')
 				}
 		self.function = loss_dict.get(value)
+
 
 @members
 class EvaluationMetricNames(enum.Enum):
@@ -126,3 +132,9 @@ class SimulationOptions(enum.Enum):
 	RUN_SIMULATION  = 'run_simulation'
 
 
+def main():
+	print(EvaluationMetricNames.AUC in ['AUC', 'ACC'])
+	print('something')
+
+if __name__ == '__main__':
+	main()

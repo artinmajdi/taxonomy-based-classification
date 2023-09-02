@@ -33,6 +33,7 @@
     "techniqueName"                        : "loss_based",
     "parent_metric_to_use"                 : "ground_truth",
     "max_evals"                            : 20,
+    "thresh_technique"                     : "ROC",
     "hyper_param_multiplier"               : 0.0,
     "hyper_param_additive"                 : 1.0,
     "use_parallelization"                  : true,

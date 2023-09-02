@@ -1,20 +1,14 @@
 import setuptools
-from setuptools import setup, find_packages
-# from taxonomy import _version
-
-# with open("README.md", "r") as fh:
-# 	long_description = fh.read()
+from setuptools import find_packages
 
 REQUIREMENTS = [i.strip() for i in open("requirements.txt").readlines()]
 
 setuptools.setup(
 	name="taxonomy",
-	# version=_version.__version__,
+	version="1.0.0",
 	author="Artin Majdi",
 	author_email="msm2024@gmail.com",
 	description="Taxonomy Based Classification",
-	# long_description=long_description,
-	# long_description_content_type="text/markdown",
 	url="https://github.com/artinmajdi/taxonomy",
 	classifiers=[
 		"Programming Language :: Python :: 3",

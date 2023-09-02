@@ -1,16 +1,12 @@
 import argparse
 import concurrent.futures
 import contextlib
-import json
 import multiprocessing
 import pathlib
-import pickle
-from abc import ABC, abstractmethod
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import singledispatch, singledispatchmethod, wraps
-from typing import Any, Dict, List, Literal, Optional, overload, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -20,12 +16,11 @@ import sklearn
 import torch
 from hyperopt import fmin, hp, tpe
 from matplotlib import pyplot as plt
-from pandas import DataFrame
 from scipy import stats
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.data import Data, Findings, LoadChestXrayDatasets, Metrics, NodeData
+from taxonomy.utilities.data import Data, Findings, LoadChestXrayDatasets, LoadSaveFile, Metrics
 from taxonomy.utilities.model import LoadModelXRV
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
@@ -40,6 +35,7 @@ device = 'cuda' if USE_CUDA else 'cpu'
 class CalculateOriginalFindings(LoadSaveFile):
 
 	def __init__(self, data: Data, model: torch.nn.Module, config: Settings):
+		self.data = None
 		self.findings_original = Findings(data=data, model=model, config=config)
 		self.save_path_full    = config.output.path / 'details' / 'baseline' / 'findings_original.pkl'
 
@@ -81,7 +77,7 @@ class CalculateOriginalFindings(LoadSaveFile):
 
 				for ix, lbl_name in enumerate(pathologies):
 
-					# This skips the empty labels (i.e. the labels that are not in both the dataset & model)
+					# This skips the empty labels (i.e., the labels that are not in both the dataset & model)
 					if len(lbl_name) == 0: continue
 
 					task_truth, task_pred = truth_batch[:, ix].double() , pred_batch[:, ix].double()
@@ -157,7 +153,7 @@ class CalculateOriginalFindings(LoadSaveFile):
 
 
 class CalculateNewFindings:
-	def __init__(self, model: torch.nn.Module, data: Data, hyperparameters: dict, config: argparse.Namespace, methodName: TechniqueNames):
+	def __init__(self, model: torch.nn.Module, data: Data, hyperparameters: dict, config: Settings, methodName: TechniqueNames):
 
 		self.model            = model
 		self.hyperparameters  = hyperparameters
@@ -173,8 +169,8 @@ class CalculateNewFindings:
 		def calculate_H(parent_node: str) -> np.ndarray:
 
 			def calculate_raw_weight(pdata) -> pd.Series:
-				if   methodName is TechniqueNames.LOGIT_BASED: return pd.Series(a * pdata.data.logit.to_numpy(), index=pdata.data.index)
-				elif methodName is TechniqueNames.LOSS_BASED:  return pd.Series(a * pdata.data.loss.to_numpy() + b, index=pdata.data.index)
+				if   methodName is TechniqueNames.LOGIT: return pd.Series(a * pdata.data.logit.to_numpy(), index=pdata.data.index)
+				elif methodName is TechniqueNames.LOSS:  return pd.Series(a * pdata.data.loss.to_numpy() + b, index=pdata.data.index)
 				else: raise ValueError(' methodName is not supproted')
 
 			def apply_parent_doesnot_exist_condition(hierarchy_penalty: pd.Series, pdata) -> np.ndarray:
@@ -184,7 +180,8 @@ class CalculateNewFindings:
 					elif parent_condition_mode == 'truth': return pdata.data.truth >= 0.5
 					elif parent_condition_mode == 'none' : return pdata.data.truth < 0
 
-				# Setting the hierarchy_penalty to 1 for samples where the parent class exist, because we can not infer any information from those samples.
+				# Setting the hierarchy_penalty to one for samples where the parent class exist,
+				# because we can not infer any information from those samples.
 				hierarchy_penalty[parent_exist()] = 1.0
 
 				# Setting the hierarchy_penalty to 1.0 for samples where we don't have the truth label for parent class.
@@ -195,29 +192,29 @@ class CalculateNewFindings:
 			# Getting the parent data
 			pdata = Hierarchy.get_findings_for_node(graph=graph, node=parent_node, experimentStage=ExperimentStageNames.ORIGINAL, thresh_technique=thresh_technique)
 
-			# Calculating the initial hierarchy_penalty based on "a" , "b" and "methodName"
+			# Calculating the initial hierarchy_penalty based on "a", "b" and "methodName"
 			hierarchy_penalty = calculate_raw_weight(pdata)
 
-			# Cleaning up the hierarchy_penalty for the current node: Setting the hierarchy_penalty to 1 for samples where the parent class exist, and Nan if the parent label is Nan
+			# Cleaning up the hierarchy_penalty for the current node: Setting the hierarchy_penalty to one for samples where the parent class exist, and Nan if the parent label is Nan
 			return apply_parent_doesnot_exist_condition( hierarchy_penalty=hierarchy_penalty, pdata=pdata )
 
 		def set_H_to_be_ineffective() -> np.ndarray:
 
 			ndata = Hierarchy.get_findings_for_node(graph=graph, node=node, thresh_technique=thresh_technique, experimentStage=ExperimentStageNames.ORIGINAL)
 
-			if   methodName is TechniqueNames.LOGIT_BASED: return np.zeros(len(ndata.data.index))
-			elif methodName is TechniqueNames.LOSS_BASED:  return np.ones(len(ndata.data.index))
+			if   methodName is TechniqueNames.LOGIT: return np.zeros(len(ndata.data.index))
+			elif methodName is TechniqueNames.LOSS:  return np.ones(len(ndata.data.index))
 
 			raise ValueError(' methodName is not supproted')
 
-		# Get the parent node of the current node. We assume that each node can only have one parent to aviod complications in theoretical calculations.
+		# Get the parent node of the current node. We assume that each node can only have one parent to avoid complications in theoretical calculations.
 		parent_node = Hierarchy.get_parent_node(graph=graph, node=node)
 
 		# Calculating the hierarchy_penalty for the current node
 		return calculate_H(parent_node) if parent_node else set_H_to_be_ineffective()
 
 	@staticmethod
-	def do_approach(config, w, ndata):  # type: (argparse.Namespace, pd.Series, Hierarchy.OUTPUT) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
+	def do_approach(config, w, ndata):  # type: (Settings, pd.Series, Hierarchy.OUTPUT) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
 
 		def do_approach2_per_node():
 
@@ -251,11 +248,11 @@ class CalculateNewFindings:
 
 			return pred_new.to_numpy(), logit_new.to_numpy()
 
-		if  config.methodName is TechniqueNames.LOGIT_BASED:
+		if  config.methodName is TechniqueNames.LOGIT:
 			pred_new, logit_new = do_approach1_per_node()
 			loss_new = np.ones(pred_new.shape) * np.nan
 
-		elif config.methodName is TechniqueNames.LOSS_BASED:
+		elif config.methodName is TechniqueNames.LOSS:
 			pred_new, loss_new  = do_approach2_per_node()
 			logit_new = np.ones(pred_new.shape) * np.nan
 		else:
@@ -264,7 +261,7 @@ class CalculateNewFindings:
 		return pred_new, logit_new, loss_new
 
 	@staticmethod
-	def calculate_per_node(node: str, data: Data, config: argparse.Namespace, hyperparameters: Dict[ThreshTechList, pd.DataFrame], thresh_technique: ThreshTechList) -> Data:
+	def calculate_per_node(node: str, data: Data, config: Settings, hyperparameters: Dict[ThreshTechList, pd.DataFrame], thresh_technique: ThreshTechList) -> Data:
 
 		x = thresh_technique
 		graph = data.Hierarchy_cls.graph
@@ -297,7 +294,7 @@ class CalculateNewFindings:
 		return data
 
 	@staticmethod
-	def calculate(data, config, hyperparameters):  # type: (Data, argparse.Namespace, Dict[str, pd.DataFrame]) -> Data
+	def calculate(data, config, hyperparameters):  # type: (Data, Settings, Dict[str, pd.DataFrame]) -> Data
 
 		def initialization():
 
@@ -320,7 +317,7 @@ class CalculateNewFindings:
 			for node in data.labels.nodes.non_null:
 				data = CalculateNewFindings.calculate_per_node( node=node, data=data, config=config, hyperparameters=hyperparameters, thresh_technique=x )
 
-		data.NEW.results = { key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', TechniqueNames.LOSS_BASED.modelName, 'hierarchy_penalty'] }
+		data.NEW.results = { key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', TechniqueNames.LOSS.modelName, 'hierarchy_penalty'] }
 
 		return data
 
@@ -337,7 +334,7 @@ class CalculateNewFindings:
 		LoadSaveFindings(self.config, self.save_path_full).save( self.data.NEW.results )
 
 	@classmethod
-	def get_updated_data(cls, model: torch.nn.Module, data: Data, hyperparameters: dict, config: argparse.Namespace, methodName: TechniqueNames) -> Data:
+	def get_updated_data(cls, model: torch.nn.Module, data: Data, hyperparameters: dict, config: Settings, methodName: TechniqueNames) -> Data:
 
 		# Initializing the class
 		NEW = cls(model=model, data=data, hyperparameters=hyperparameters, config=config, methodName=methodName)
@@ -356,7 +353,7 @@ class CalculateNewFindings:
 
 class HyperParameterTuning:
 
-	def __init__(self, config, data , model):  # type: (argparse.Namespace, Data, torch.nn.Module) -> None
+	def __init__(self, config, data , model):  # type: (Settings, Data, torch.nn.Module) -> None
 
 		self.config      = config
 		self.data 		 = data
@@ -372,7 +369,7 @@ class HyperParameterTuning:
 		return {th: pd.DataFrame( {n:dict(a=a,b=b) for n in self.model.pathologies} ) for th in ThreshTechList}
 
 	@staticmethod
-	def calculate_per_node(data: Data, config: argparse.Namespace, hyperparameters: Dict[str, pd.DataFrame], node: str, thresh_technique: ThreshTechList=ThreshTechList.DEFAULT) -> List[float]:
+	def calculate_per_node(data: Data, config: Settings, hyperparameters: Dict[str, pd.DataFrame], node: str, thresh_technique: ThreshTechList=ThreshTechList.DEFAULT) -> List[float]:
 
 		def objective_function(args: Dict[str, float], hp_in) -> float:
 
@@ -396,7 +393,7 @@ class HyperParameterTuning:
 		return [ best['a'] , best['b'] ]
 
 	@staticmethod
-	def calculate(initial_hp, config, data):  # type: (Dict[str, pd.DataFrame], argparse.Namespace, Data) -> Dict[str, pd.DataFrame]
+	def calculate(initial_hp, config, data):  # type: (Dict[str, pd.DataFrame], Settings, Data) -> Dict[str, pd.DataFrame]
 
 		def extended_calculate_per_node(nt: List[str]) -> List[Union[str, float]]:
 			hyperparameters_updated = HyperParameterTuning.calculate_per_node( node=nt[0], thresh_technique=nt[1],data=data, config=config, hyperparameters=deepcopy(initial_hp))
@@ -518,7 +515,7 @@ class MetricsAllTechniques:
 
 
 	@staticmethod
-	def plot_roc_curves(logit: Metrics, thresh_technique: ThreshTechList, config: argparse.Namespace, list_nodes_impacted: list, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
+	def plot_roc_curves(logit: Metrics, thresh_technique: ThreshTechList, config: Settings, list_nodes_impacted: list, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
 
 		def save_plot():
 			save_path = config.PATH_LOCAL.joinpath( f'figures/roc_curve_all_datasets/{thresh_technique}/')
@@ -594,7 +591,7 @@ class MetricsAllTechniques:
 			leg = ax.legend(lines, labels, loc='lower right', fontsize=fontsize, title=node)
 			plt.setp(leg.get_title(),fontsize=fontsize)
 
-			# Set the background color of the plot to grey if the node is a parent node
+			# Set the background color of the plot to gray if the node is a parent node
 			if node in list_parent_nodes:
 				ax.set_facecolor('xkcd:light grey')
 
@@ -629,10 +626,10 @@ class MetricsAllTechniqueThresholds:
 
 class TaxonomyXRV:
 
-	def __init__(self, config: argparse.Namespace, seed: int=10):
+	def __init__(self, config: Settings, seed: int=10):
 
 		self.hyperparameters = None
-		self.config         : argparse.Namespace                  = config
+		self.config         : Settings                  = config
 		self.train          : Optional[Data]                      = None
 		self.test           : Optional[Data]                      = None
 		self.model          : Optional[torch.nn.Module]           = None
@@ -788,13 +785,13 @@ class TaxonomyXRV:
 		model = LoadModelXRV(config).load().model
 
 		# Load the data
-		LD = LoadChestXrayDatasets( config=config )
+		LD = LoadChestXrayDatasets.load( config=config )
 		LD.load()
 
 		return LD.train, LD.test, model, LD.dataset_full
 
 	@classmethod
-	def run_full_experiment(cls, methodName=TechniqueNames.LOSS_BASED, seed=10, **kwargs):
+	def run_full_experiment(cls, methodName=TechniqueNames.LOSS, seed=10, **kwargs):
 
 		# Getting the user arguments
 		config = get_settings( jupyter=True, **kwargs )
@@ -893,8 +890,8 @@ class TaxonomyXRV:
 				df.loc['BF10',node]    = df_ttest['BF10'].values[0]
 
 			metrics_comparison = pd.DataFrame(columns=baseline.pred.columns, index=['kappa', 'p_value', 't_stat', 'power', 'cohen-d','BF10'])
-			# auc_acc_f1_baseline = pd.DataFrame(columns=baseline.pred.columns, index=EvaluationMetricNames.members())
-			# auc_acc_f1_proposed = pd.DataFrame(columns=baseline.pred.columns, index=EvaluationMetricNames.members())
+			# auc_acc_f1_baseline = pd.DataFrame (columns=baseline.pred.columns, index=EvaluationMetricNames.members())
+			# auc_acc_f1_proposed = pd.DataFrame (columns=baseline.pred.columns, index=EvaluationMetricNames.members())
 
 			for node in baseline.pred.columns:
 				get_auc_acc_f1(node, baseline)
@@ -915,8 +912,8 @@ class TaxonomyXRV:
 			return auc_acc_f1
 
 		if config.do_metrics == 'calculate':
-			logit 	   = apply_to_approach(TechniqueNames.LOGIT_BASED)
-			loss  	   = apply_to_approach(TechniqueNames.LOSS_BASED)
+			logit 	   = apply_to_approach(TechniqueNames.LOGIT)
+			loss  	   = apply_to_approach(TechniqueNames.LOSS)
 			auc_acc_f1 = get_auc_acc_f1_merged(logit, loss)
 
 			# Saving the metrics locally

@@ -1,20 +1,24 @@
+from __future__ import annotations
+
 import itertools
 import json
 import pathlib
 import pickle
 from dataclasses import dataclass, field, InitVar
-from functools import cached_property, singledispatch, wraps
-from typing import Any, Optional, Self, Tuple, Union
+from functools import cache, cached_property, lru_cache, singledispatchmethod, wraps
+from typing import Any, Optional, Tuple, Union
 
 import networkx as nx
+import numpy as np
 import pandas as pd
+import sklearn
 import torch
 import torchvision
+import torchxrayvision as xrv
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader as torch_DataLoader
 
-import torchxrayvision as xrv
-from taxonomy.utilities.params import DatasetNames, ExperimentStageNames, HyperparameterNames, \
+from taxonomy.utilities.params import DatasetNames, EvaluationMetricNames, ExperimentStageNames, HyperparameterNames, \
 	ThreshTechList
 from taxonomy.utilities.settings import DatasetInfo, Settings
 
@@ -162,10 +166,10 @@ class Nodes:
 			node_trace.text = node_text
 
 			# Add node labels
-			annotations = []
+			annotations_list = []
 			for node in graph.nodes():
 				x, y = pos[node]
-				annotations.append(
+				annotations_list.append(
 						go.layout.Annotation(text=str(node), x=x, y=y, showarrow=False, font=dict(size=10, color='black')))
 
 			layout = go.Layout(title='Networkx DiGraph',
@@ -174,7 +178,7 @@ class Nodes:
 							   margin     = dict(b    = 20, l = 5, r = 5, t = 40),
 							   xaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
 							   yaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
-							   annotations = annotations
+							   annotations = annotations_list
 							   )
 			fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
 			fig.show()
@@ -197,7 +201,6 @@ class Data:
 	def __post_init__(self):
 		self.labels = Data.create_labels_dataframe(self.dataset)
 		self.nodes  = Data.create_nodes(self.labels)
-		self.data_loader =
 
 	@staticmethod
 	def create_labels_dataframe(dataset: xrv.datasets.Dataset) -> pd.DataFrame:
@@ -209,18 +212,89 @@ class Data:
 
 
 @dataclass
-class Metrics:
-	classes  : InitVar[set[str]]
-	ACC      : Optional[pd.DataFrame] = None
-	AUC      : Optional[pd.DataFrame] = None
-	F1       : Optional[pd.DataFrame] = None
-	THRESHOLD: Optional[pd.DataFrame] = None
+class DataAll(Data):
+	train: Data = None
+	test : Data = None
 
-	def __post_init__(self, classes: set[str]):
-		self.ACC       = pd.DataFrame(columns = list(classes), dtype = float)
-		self.AUC       = pd.DataFrame(columns = list(classes), dtype = float)
-		self.F1        = pd.DataFrame(columns = list(classes), dtype = float)
-		self.THRESHOLD = pd.DataFrame(columns = list(classes), dtype = float)
+
+@dataclass
+class Metrics:
+	ACC         : Union[pd.Series, pd.DataFrame]  = field(default=None)
+	AUC         : Union[pd.Series, pd.DataFrame]  = field(default=None)
+	F1          : Union[pd.Series, pd.DataFrame]  = field(default=None)
+	THRESHOLD   : Union[pd.Series, pd.DataFrame]  = field(default=None)
+
+
+	def init_metrics(self, classes):
+		self.ACC       = self.ACC       or pd.Series(index = list(classes), dtype = float)
+		self.AUC       = self.AUC       or pd.Series(index = list(classes), dtype = float)
+		self.F1        = self.F1        or pd.Series(index = list(classes), dtype = float)
+		self.THRESHOLD = self.THRESHOLD or pd.Series(index = list(classes), dtype = float)
+
+
+	@classmethod
+	def calculate_metrics(cls, truth_values: pd.DataFrame, pred_values: pd.DataFrame, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
+
+		threshold, auc, acc, f1 = {}, {}, {}, {}
+
+		for n in truth_values.columns:
+			threshold[n], auc[n], acc[n], f1[n] = cls.calculate_metrics_per_class( y=truth_values[n].to_numpy(), yhat=pred_values[n].to_numpy(), thresh_technique=thresh_technique)
+
+		return cls(ACC=pd.Series(acc), AUC=pd.Series(auc), F1=pd.Series(f1), THRESHOLD=pd.Series(threshold))
+
+
+	@staticmethod
+	def _get_non_null_samples(y: np.ndarray, yhat: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
+		"""Filter out null samples and check if calculation should proceed."""
+
+		non_null = ~np.isnan( y )
+		y, yhat = y[non_null], yhat[non_null]
+
+		THERE_EXIST_NOTNULL_SAMPLES = (len(y) > 0)
+		THERE_ARE_TWO_CLASSES       = (np.unique(y).size == 2)
+		do_calculation              = THERE_EXIST_NOTNULL_SAMPLES and THERE_ARE_TWO_CLASSES
+		return y, yhat, do_calculation
+
+
+	lru_cache(maxsize=30)
+	@staticmethod
+	def calculate_metrics_per_class(y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> Tuple[float, float, float, float]:
+
+		y, yhat, do_calculation = Metrics._get_non_null_samples( y, yhat )
+
+		if not do_calculation:
+			return np.nan, np.nan, np.nan, np.nan
+
+		def get_thresh() -> float:
+			def apply_roc() -> float:
+				fpr, tpr, th = sklearn.metrics.roc_curve( y, yhat )
+				return th[np.argmax( tpr - fpr )]
+
+			def apply_precision_recall() -> float:
+				ppv, recall, th = sklearn.metrics.precision_recall_curve( y, yhat )
+				f_score = 2 * (ppv * recall) / (ppv + recall)
+				return th[np.argmax( f_score )]
+
+			func = { ThreshTechList.DEFAULT         : lambda: 0.5,
+					  ThreshTechList.ROC             : apply_roc,
+					  ThreshTechList.PRECISION_RECALL: apply_precision_recall }
+
+			return func[thresh_technique]()
+
+		def get_auc() -> float:
+			return sklearn.metrics.roc_auc_score( y, yhat )
+
+		def get_acc() -> float:
+			return sklearn.metrics.accuracy_score( y, yhat >= threshold )
+
+		def get_f1() -> float:
+			return sklearn.metrics.f1_score( y, yhat >= threshold )
+
+		threshold = get_thresh() if (EvaluationMetricNames.THRESHOLD in evaluation_metrics) else np.nan
+		auc       = get_auc()	 if (EvaluationMetricNames.AUC in evaluation_metrics) else np.nan
+		acc       = get_acc() 	 if (EvaluationMetricNames.ACC in evaluation_metrics) else np.nan
+		f1        = get_f1() 	 if (EvaluationMetricNames.F1 in evaluation_metrics) else np.nan
+		return threshold, auc, acc, f1
 
 
 @dataclass
@@ -262,7 +336,7 @@ class LoadChestXrayDatasets:
 		self.nodes  = Data.create_nodes(self.labels)
 		self.load_raw_database().relabel_raw_database()
 
-	def load_raw_database(self) -> Self:
+	def load_raw_database(self) -> 'LoadChestXrayDatasets':
 		"""
 			# RSNA Pneumonia Detection Challenge. https://pubs.rsna.org/doi/full/10.1148/ryai.2019180041
 				Augmenting the National Institutes of Health Chest Radiograph Dataset with Expert
@@ -344,7 +418,7 @@ class LoadChestXrayDatasets:
 		self.dataset = dataset_getter[self.datasetInfo.datasetName](**self.datasetInfo.params_config)
 		return self
 
-	def relabel_raw_database(self) -> Self:
+	def relabel_raw_database(self) -> 'LoadChestXrayDatasets':
 		from taxonomy.utilities.model import LoadModelXRV
 
 		# Adding the PatientID if it doesn't exist
@@ -361,7 +435,7 @@ class LoadChestXrayDatasets:
 
 		return self
 
-	def post_process_one_dataset(self) -> Self:
+	def post_process_one_dataset(self) -> 'LoadChestXrayDatasets':
 
 		def update_empty_parent_class_based_on_its_children_classes() -> Optional:
 
@@ -427,7 +501,7 @@ class LoadChestXrayDatasets:
 		return LoadChestXrayDatasets.train_test_split(config=self.config, dataset=self.dataset)
 
 	@classmethod
-	def load(cls, config: Settings) -> Tuple[Data, Data]:
+	def load(cls, config: Settings) -> DataAll:
 
 		dt_train_list = []
 		dt_test_list  = []
@@ -443,7 +517,7 @@ class LoadChestXrayDatasets:
 
 		train = Data( dataset = dataset_train, data_loader = dataloader_train)
 		test  = Data( dataset = dataset_test , data_loader = dataloader_test )
-		return train, test
+		return DataAll( train=train, test=test )
 
 	@staticmethod
 	def create_dataloader(config, dataset):
@@ -469,7 +543,8 @@ class LoadChestXrayDatasets:
 def check_file_exist(func):
 	@wraps(func)
 	def wrapper(self, file_path: Union[str, pathlib.Path], *args, **kwargs):
-		if not (file_path := pathlib.Path(file_path)).is_file():
+		file_path = pathlib.Path(file_path)
+		if not file_path.is_file():
 			raise FileNotFoundError(f'file_path {file_path} does not exist')
 		return func(self, file_path, *args, **kwargs)
 	return wrapper
@@ -478,7 +553,8 @@ def check_file_exist(func):
 def create_file_path_if_not_exist(func):
 	@wraps(func)
 	def wrapper(self, file_path: Union[str, pathlib.Path], *args, **kwargs):
-		(file_path := pathlib.Path(file_path)).parent.mkdir(parents=True, exist_ok=True)
+		file_path = pathlib.Path(file_path)
+		file_path.parent.mkdir(parents=True, exist_ok=True)
 		return func(self, file_path, *args, **kwargs)
 	return wrapper
 
@@ -510,13 +586,13 @@ class LoadSaveFile:
 
 		raise NotImplementedError(f'file_type {file_path.suffix} is not supported')
 
-	@singledispatch
+	@singledispatchmethod
 	@create_file_path_if_not_exist
 	def save(self, data: Any, file_path: Union[str, pathlib.Path], **kwargs):
 		raise NotImplementedError(f'file_type {type(data)} is not supported')
 
 	@save.register(dict)
-	def save(self, data: dict, file_path: Union[str, pathlib.Path], **kwargs) -> None:
+	def _(self, data: dict, file_path: Union[str, pathlib.Path], **kwargs) -> None:
 		assert file_path.suffix in {'.pkl', '.json'}, ValueError( f'file type {file_path.suffix} is not supported' )
 
 		if file_path.suffix == '.pkl':
@@ -532,17 +608,17 @@ class LoadSaveFile:
 			self.save(pd.DataFrame.from_dict(data), file_path, **kwargs)
 
 	@save.register(pd.Series)
-	def save(self, data: pd.Series, file_path: Union[str, pathlib.Path], **kwargs):
+	def _(self, data: pd.Series, file_path: Union[str, pathlib.Path], **kwargs):
 		assert file_path.suffix == '.csv', ValueError(f'file type {file_path.suffix} is not supported')
 		data.to_csv(file_path, **kwargs)
 
 	@save.register(pd.DataFrame)
-	def save(self, data: pd.DataFrame, file_path: Union[str, pathlib.Path], **kwargs) -> None:
+	def _(self, data: pd.DataFrame, file_path: Union[str, pathlib.Path], **kwargs) -> None:
 		assert file_path.suffix == '.xlsx', ValueError(f'file type {file_path.suffix} is not supported')
 		data.to_excel(file_path, **kwargs)
 
 	@save.register(plt.Figure)
-	def save(self, data: plt.Figure, file_path: Union[str, pathlib.Path], file_format: Union[str, list[str]] = None, **kwargs):
+	def _(self, data: plt.Figure, file_path: Union[str, pathlib.Path], file_format: Union[str, list[str]] = None, **kwargs):
 		file_format = file_format or [file_path.suffix]
 		file_format = [file_format] if isinstance(file_format, str) else file_format
 
@@ -550,8 +626,11 @@ class LoadSaveFile:
 			data.savefig(file_path.with_suffix(fmt), format=fmt.lstrip('.'), dpi=300, **kwargs)
 
 
-if __name__ == '__main__':
-	config = Settings()
-	Train, Test = LoadChestXrayDatasets.load(config)
+def main():
+	config2 = Settings()
+	Train, Test = LoadChestXrayDatasets.load(config2)
 
 	print('temp')
+
+if __name__ == '__main__':
+	main()

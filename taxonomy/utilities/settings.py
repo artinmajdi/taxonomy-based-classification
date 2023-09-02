@@ -3,14 +3,13 @@ import json
 import pathlib
 import sys
 from dataclasses import dataclass, field, InitVar
-from typing import Any
+from typing import Any, Union
 
-import pydantic
-from pydantic import field_validator
+from pydantic import BaseModel, conint, confloat, Field, field_validator, FieldValidationInfo
 
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, LossFunctionOptions, \
 	ModelWeightNames, \
-	ParentMetricToUseNames, SimulationOptions, TechniqueNames
+	ParentMetricToUseNames, SimulationOptions, TechniqueNames, ThreshTechList
 
 
 @dataclass
@@ -60,39 +59,41 @@ class DatasetInfo:
 		meta_data_dict = {'mimi': 'MIMIC/mimic-cxr-2.0.0-metadata.csv.gz'}
 		return meta_data_dict.get(self.datasetName.value)
 
-class DatasetSettings(pydantic.BaseModel):
-	data_mode        : DataModes     	  = DataModes.TRAIN
-	path_all_datasets: pathlib.Path       = pathlib.Path( './datasets' )
-	datasetInfoList  : list = pydantic.Field( default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT], description='list of dataset names. e.g. ["PC", "NIH", "CheX"]' )
-	views            : list[str]    = pydantic.Field(default_factory = lambda: ['PA', 'AP'])
-	non_null_samples : bool         = True
-	max_samples      : pydantic.conint(gt=0)         = 1000
-	train_test_ratio : pydantic.confloat(ge=0, le=1) = 0.7
+class DatasetSettings(BaseModel):
+	data_mode        : DataModes    = DataModes.TRAIN
+	views            : list[str]    = Field(default_factory = lambda: ['PA', 'AP'])
+	path_all_datasets: pathlib.Path = pathlib.Path('./datasets')
+	datasetInfoList  : list[DatasetNames] = Field( default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT])
+	non_null_samples: bool          = True
+	max_samples      : conint(gt=0) = 1000
+	train_test_ratio : confloat(ge=0, le=1) = 0.7
 
 	@field_validator('path_all_datasets', mode='after')
-	def make_path_absolute(cls, v):
+	@classmethod
+	def make_path_absolute(cls, v: pathlib.Path):
 		return v.resolve()
 
 	@field_validator('datasetInfoList', mode='after')
-	def post_process_info(cls, value: list[DatasetNames], values) -> list[DatasetInfo]:
+	@classmethod
+	def post_process_info(cls, v: list[DatasetNames], info: FieldValidationInfo) -> list[DatasetInfo]:
 		"""	Convert the list of dataset names to a list of DatasetInfo objects	"""
-		return [ DatasetInfo(   path_all_datasets = values.path_all_datasets,
-								data_mode         = values.data_mode,
-								views 			  = values.views,
+		return [ DatasetInfo(   path_all_datasets = info.data['path_all_datasets'],
+								data_mode         = info.data['data_mode'],
+								views 			  = info.data['views'],
 								datasetName       = DatasetNames(dt))
-				 for dt in value]
+				 for dt in v]
 
-class TrainingSettings(pydantic.BaseModel):
+class TrainingSettings(BaseModel):
 	criterion	      : LossFunctionOptions = LossFunctionOptions.BCE
-	batches_to_process: pydantic.conint(ge   = 1) = 10
-	augmentation_count: pydantic.conint(ge   = 0) = 1
-	learning_rate     : pydantic.confloat(gt = 0) = 0.0001
-	batch_size        : pydantic.conint(ge   = 1) = 1000
-	epochs            : pydantic.conint(ge   = 1) = 3
+	batches_to_process: conint(ge   = 1) = 10
+	augmentation_count: conint(ge   = 0) = 1
+	learning_rate     : confloat(gt = 0) = 0.0001
+	batch_size        : conint(ge   = 1) = 1000
+	epochs            : conint(ge   = 1) = 3
 	shuffle: bool = False
 	silent : bool = True
 
-class ModelSettings(pydantic.BaseModel):
+class ModelSettings(BaseModel):
 	modelName            : ModelWeightNames = ModelWeightNames.ALL_224
 	chexpert_weights_path: pathlib.Path     = pathlib.Path("./pre_trained_models/chestxray/chexpert_baseline_model_weight.zip")
 
@@ -100,30 +101,32 @@ class ModelSettings(pydantic.BaseModel):
 	def full_name(self) -> str:
 		return self.modelName.full_name
 
-class SimulationSettings(pydantic.BaseModel):
+class SimulationSettings(BaseModel):
 	findings_original: SimulationOptions = SimulationOptions.RUN_SIMULATION
 	findings_new     : SimulationOptions = SimulationOptions.RUN_SIMULATION
 	hyperparameters  : SimulationOptions = SimulationOptions.RUN_SIMULATION
 	metrics          : SimulationOptions = SimulationOptions.RUN_SIMULATION
 
-class HyperParameterTuningSettings(pydantic.BaseModel):
+class HyperParameterTuningSettings(BaseModel):
 	metric_used_to_select_best_parameters: EvaluationMetricNames = EvaluationMetricNames.AUC
 	techniqueName         : TechniqueNames         = TechniqueNames.LOGIT
 	parent_metric_to_use  : ParentMetricToUseNames = ParentMetricToUseNames.TRUTH
-	max_evals             : pydantic.conint(gt = 0) = 20
-	num_workers           : pydantic.conint(gt = 0) = 1
-	hyper_param_multiplier: pydantic.confloat(ge = 0) = 0.0
-	hyper_param_additive  : pydantic.confloat(ge = 0) = 1.0
+	max_evals             : conint(gt = 0) = 20
+	num_workers           : conint(gt = 0) = 1
+	hyper_param_multiplier: confloat(ge = 0) = 0.0
+	hyper_param_additive  : confloat(ge = 0) = 1.0
 	use_parallelization   : bool = True
+	thresh_technique	  : ThreshTechList = ThreshTechList.ROC
 
-class OutputSettings(pydantic.BaseModel):
+class OutputSettings(BaseModel):
 	path: pathlib.Path = pathlib.Path('../outputs')
 
 	@field_validator('path', mode='after')
-	def make_path_absolute(cls, v):
+	@classmethod
+	def make_path_absolute(cls, v: pathlib.Path):
 		return v.resolve()
 
-class Settings(pydantic.BaseSettings):
+class Settings(BaseModel):
 
 	dataset                    : DatasetSettings
 	training                   : TrainingSettings
@@ -137,7 +140,7 @@ class Settings(pydantic.BaseSettings):
 		case_sensitive       = False
 		str_strip_whitespace = True
 
-def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings | ValueError:
+def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings:
 
 	def parse_args() -> dict:
 		"""	Getting the arguments from the command line
@@ -188,7 +191,7 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 
 		return {k: v for k, v in vars(parsed_args).items() if v is not None}
 
-	def get_config(args_dict: dict) -> Settings | ValueError:
+	def get_config(args_dict: dict) -> Union[Settings,ValueError]:
 
 		# Loading the config.json file
 		config_dir = pathlib.Path(args_dict.get('config') or config_name).resolve()
@@ -226,7 +229,10 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 	# Updating the config file
 	return  get_config(args_dict=parse_args())
 
-if __name__ == '__main__':
+def main():
 	config = get_settings()
+	print('sometjhong')
+	print(config.dataset.datasetInfoList)
 
-	print(config)
+if __name__ == '__main__':
+	main()

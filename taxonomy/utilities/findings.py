@@ -1,4 +1,3 @@
-import argparse
 import itertools
 import pathlib
 from dataclasses import dataclass
@@ -11,60 +10,17 @@ import sklearn
 import umap
 from matplotlib import pyplot as plt
 
-from taxonomy.utilities.data import Findings, Labels, LoadChestXrayDatasets, Metrics, LoadSaveFile
-from taxonomy.utilities.model import extract_feature_maps
+from taxonomy.utilities.data import Findings, LoadChestXrayDatasets, LoadSaveFile, Metrics
+from taxonomy.utilities.model import LoadModelXRV
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
-from taxonomy.utilities.settings import get_settings
+from taxonomy.utilities.settings import get_settings, Settings
 from taxonomy.utilities.utils import TaxonomyXRV
 
-def calculating_threshold_and_metrics(findings: Findings) -> Metrics:
 
-	classes = findings.data.nodes.classes
-	metrics = Metrics(classes=classes)
+def calculating_threshold_and_metrics(config: Settings, findings: Findings) -> Findings:
 
-	def calculating_threshold_and_metrics_per_node(node: str, findings: Findings, thresh_technique: ThreshTechList) -> Findings:
-
-		truth = findings.modelOutputs.truth_values
-		pred = findings.modelOutputs.pred_values
-
-		def calculating_optimal_thresholds(y, yhat):
-
-			if thresh_technique == ThreshTechList.DEFAULT:
-				metrics.THRESHOLD = 0.5
-
-			if thresh_technique == ThreshTechList.ROC:
-				fpr, tpr, th = sklearn.metrics.roc_curve(y, yhat)
-				metrics.THRESHOLD = th[np.argmax( tpr - fpr )]
-
-			if thresh_technique == ThreshTechList.PRECISION_RECALL:
-				ppv, recall, th = sklearn.metrics.precision_recall_curve(y, yhat)
-				f_score = 2 * (ppv * recall) / (ppv + recall)
-				metrics.THRESHOLD = th[np.argmax( f_score )]
-
-		def calculating_metrics(y, yhat, x):
-			metrics.AUC = sklearn.metrics.roc_auc_score(y, yhat)
-			metrics.ACC = sklearn.metrics.accuracy_score(y, yhat >= findings.metrics[x, node]['Threshold'])
-			metrics.F1  = sklearn.metrics.f1_score      (y, yhat >= findings.metrics[x, node]['Threshold'])
-
-		# Finding the indices where the truth is not nan
-		non_null = ~np.isnan(truth[node])
-		truth_notnull = truth[node][non_null].to_numpy()
-
-		if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-			pred = findings.modelOutputs.pred_values[node]
-			pred_notnull = pred[non_null].to_numpy()
-
-			calculating_optimal_thresholds( y = truth_notnull, yhat = pred_notnull)
-			calculating_metrics(y = truth_notnull, yhat = pred_notnull , x = thresh_technique)
-
-		return findings
-
-	for x in ThreshTechList:
-		for node in DATA.pathologies:
-			DATA = calculating_threshold_and_metrics_per_node(node=node, findings=DATA, thresh_technique=x)
-
-	return DATA
+	findings.metrics = Metrics.calculate_metrics(truth_values=findings.modelOutputs.truth_values, pred_values=findings.modelOutputs.pred_values, thresh_technique=config.hyperparameter_tuning.thresh_technique)
 
 
 class Tables:
@@ -94,12 +50,12 @@ class Tables:
 			F1  = pd.DataFrame(columns = columns)
 			ACC = pd.DataFrame(columns = columns)
 
-			LOGIT    = TechniqueNames.LOGIT_BASED.modelName
-			LOSS     = TechniqueNames.LOSS_BASED.modelName
+			LOGIT    = TechniqueNames.LOGIT.modelName
+			LOSS     = TechniqueNames.LOSS.modelName
 			BASELINE = TechniqueNames.BASELINE.name
 
 			for dt in DatasetNames.members():
-				df = TaxonomyXRV.run_full_experiment(methodName=TechniqueNames.LOGIT_BASED, datasetName=dt)
+				df = TaxonomyXRV.run_full_experiment(methodName=TechniqueNames.LOGIT, datasetName=dt)
 				AUC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
@@ -108,7 +64,7 @@ class Tables:
 				F1[ (dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
 
-				df = TaxonomyXRV.run_full_experiment(methodName=TechniqueNames.LOSS_BASED, datasetName=dt)
+				df = TaxonomyXRV.run_full_experiment(methodName=TechniqueNames.LOSS, datasetName=dt)
 				AUC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
 				ACC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
@@ -136,8 +92,8 @@ class Tables:
 	@staticmethod
 	def get_dataset_unfiltered(**kwargs):
 		config = get_settings(**kwargs)
-		LD = LoadChestXrayDatasets( config=config )
-		LD.load_raw_database(datasetInfo=config.dataset.datasetInfoList[0])
+		LD = LoadChestXrayDatasets( config=config , datasetInfo=config.dataset.datasetInfoList[0])
+		LD.load_raw_database()
 		LD.relabel_raw_database()
 		LD.update_empty_parent_class_based_on_its_children_classes()
 		return LD
@@ -172,7 +128,7 @@ class Tables:
 			df[(mode, dname)] = get_PA_AP(mode=mode, dname=dname)
 
 		if save_table:
-			LoadSaveFindings(self.config, save_path).save(df)
+			LoadSaveFile.save(data=df, file_path=save_path)
 
 		return df
 
@@ -183,9 +139,9 @@ class Visualize:
 		self.config = get_settings(jupyter=jupyter, **kwargs)
 
 	@staticmethod
-	def plot_class_relationships(config: argparse.Namespace, method: str = 'TSNE',
+	def plot_class_relationships(config: Settings, method: str = 'TSNE',
 	                             data_mode: DataModes = DataModes.TEST, feature_maps: Optional[np.ndarray] = None,
-	                             labels: Optional[Labels] = None) -> None:
+	                             labels: pd.DataFrame = None) -> None:
 
 		path_main = config.PATH_LOCAL.joinpath(f'{config.DEFAULT_FINDING_FOLDER_NAME}/class_relationship')
 
@@ -231,8 +187,7 @@ class Visualize:
 
 		# Get feature maps
 		if feature_maps is None:
-			feature_maps, labels, list_non_null_nodes = extract_feature_maps(config=config,
-			                                                                              data_mode=data_mode)
+			feature_maps, labels, list_non_null_nodes = LoadModelXRV.extract_feature_maps(config=config, data_mode=data_mode)
 			labels = labels[list_non_null_nodes]
 
 		# Get Reduced features
@@ -246,7 +201,7 @@ class Visualize:
 
 		config = get_settings(datasetName=datasetName)
 
-		feature_maps, labels, list_non_null_nodes = extract_feature_maps(config=config, data_mode=data_mode)
+		feature_maps, labels, list_non_null_nodes = LoadModelXRV.extract_feature_maps(config=config, data_mode=data_mode)
 
 		for method in ['UMAP', 'TSNE']:
 			Visualize.plot_class_relationships(config=config, method=method, data_mode=data_mode,
@@ -302,7 +257,7 @@ class Visualize:
 
 
 	@staticmethod
-	def plot_metrics(config: argparse.Namespace, metrics: pd.DataFrame, thresh_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
+	def plot_metrics(config: Settings, metrics: pd.DataFrame, thresh_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
 
 
 		def save_plot():
