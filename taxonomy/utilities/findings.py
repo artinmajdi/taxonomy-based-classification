@@ -6,7 +6,6 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import seaborn as sns
-import sklearn
 import umap
 from matplotlib import pyplot as plt
 

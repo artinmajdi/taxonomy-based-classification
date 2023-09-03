@@ -5,7 +5,7 @@ import json
 import pathlib
 import pickle
 from dataclasses import dataclass, field, InitVar
-from functools import cache, cached_property, lru_cache, singledispatchmethod, wraps
+from functools import cached_property, lru_cache, singledispatchmethod, wraps
 from typing import Any, Optional, Tuple, Union
 
 import networkx as nx
@@ -212,36 +212,57 @@ class Data:
 
 
 @dataclass
-class DataAll(Data):
+class DataAll:
 	train: Data = None
 	test : Data = None
 
 
 @dataclass
 class Metrics:
-	ACC         : Union[pd.Series, pd.DataFrame]  = field(default=None)
-	AUC         : Union[pd.Series, pd.DataFrame]  = field(default=None)
-	F1          : Union[pd.Series, pd.DataFrame]  = field(default=None)
-	THRESHOLD   : Union[pd.Series, pd.DataFrame]  = field(default=None)
+	"""
+		A class for calculating evaluation metrics for binary classification tasks.
 
+		Attributes:
+		-----------
+		classes: set[str] or None
+			The set of class labels. If None, the class is assumed to be binary.
+		ACC: pd.Series or float
+			The accuracy score for each class.
+		AUC: pd.Series or float
+			The area under the ROC curve for each class.
+		F1: pd.Series or float
+			The F1 score for each class.
+		THRESHOLD: pd.Series or float
+			The decision threshold for each class.
 
-	def init_metrics(self, classes):
-		self.ACC       = self.ACC       or pd.Series(index = list(classes), dtype = float)
-		self.AUC       = self.AUC       or pd.Series(index = list(classes), dtype = float)
-		self.F1        = self.F1        or pd.Series(index = list(classes), dtype = float)
-		self.THRESHOLD = self.THRESHOLD or pd.Series(index = list(classes), dtype = float)
+		Methods:
+		--------
+		calculate(truth_values, pred_values, thresh_technique='roc', evaluation_metrics=['threshold', 'auc', 'acc', 'f1'])
+			Calculate the evaluation metrics for the given truth and predicted values.
+	"""
+	classes     : InitVar[Union[set[str], None]]  = None
+	ACC         : Union[pd.Series, float]  = field(default=None)
+	AUC         : Union[pd.Series, float]  = field(default=None)
+	F1          : Union[pd.Series, float]  = field(default=None)
+	THRESHOLD   : Union[pd.Series, float]  = field(default=None)
 
+	def __post_init__(self, classes: set[str] = None):
+		"""
+			Initialize the Metrics object.
 
-	@classmethod
-	def calculate_metrics(cls, truth_values: pd.DataFrame, pred_values: pd.DataFrame, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
+			Parameters:
+			-----------
+			classes: set[str] or None
+				The set of class labels. If None, the class is assumed to be binary.
+		"""
+		def default():
+			condition = (classes is None) or (len(classes) == 1)
+			return np.nan if condition else pd.Series(index=list(classes), dtype=float)
 
-		threshold, auc, acc, f1 = {}, {}, {}, {}
-
-		for n in truth_values.columns:
-			threshold[n], auc[n], acc[n], f1[n] = cls.calculate_metrics_per_class( y=truth_values[n].to_numpy(), yhat=pred_values[n].to_numpy(), thresh_technique=thresh_technique)
-
-		return cls(ACC=pd.Series(acc), AUC=pd.Series(auc), F1=pd.Series(f1), THRESHOLD=pd.Series(threshold))
-
+		self.ACC       = self.ACC or default()
+		self.AUC       = self.AUC or default()
+		self.F1        = self.F1  or default()
+		self.THRESHOLD = self.THRESHOLD or default()
 
 	@staticmethod
 	def _get_non_null_samples(y: np.ndarray, yhat: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
@@ -255,15 +276,59 @@ class Metrics:
 		do_calculation              = THERE_EXIST_NOTNULL_SAMPLES and THERE_ARE_TWO_CLASSES
 		return y, yhat, do_calculation
 
+	@singledispatchmethod
+	@classmethod
+	def calculate(cls, truth_values: Any, pred_values: Any, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
+		raise NotImplementedError(f"Metrics not implemented for type {type(truth_values)}")
 
-	lru_cache(maxsize=30)
-	@staticmethod
-	def calculate_metrics_per_class(y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> Tuple[float, float, float, float]:
+	@calculate.register(pd.DataFrame)
+	@classmethod
+	@lru_cache(maxsize=50)
+	def _(cls, truth_values: pd.DataFrame, pred_values: pd.DataFrame, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
+		"""
+			Args:
+				truth_values (pd.DataFrame): The ground truth values.
+				pred_values (pd.DataFrame): The predicted values.
+				thresh_technique (ThreshTechList, optional): The threshold technique to use. Defaults to ThreshTechList.ROC.
+
+			Returns:
+				Metrics: The calculated metrics.
+
+			Examples:
+				```python
+				truth_values = pd.DataFrame(...)
+				pred_values = pd.DataFrame(...)
+				metrics = calculate(truth_values, pred_values)
+				print(metrics)
+				```
+		"""
+
+		metrics = cls(classes=truth_values.columns)
+
+		for n in truth_values.columns:
+			mts: Metrics = cls(classes=n).calculate( y=truth_values[n].to_numpy(), yhat=pred_values[n].to_numpy(), thresh_technique=thresh_technique)
+
+			metrics.THRESHOLD[n] = mts.THRESHOLD
+			metrics.AUC[n] 	     = mts.AUC
+			metrics.ACC[n] 	     = mts.ACC
+			metrics.F1[n] 	     = mts.F1
+
+		return metrics
+
+	@calculate.register(np.ndarray)
+	@classmethod
+	@lru_cache(maxsize=50)
+	def _(cls, y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
+
+		assert len(y.shape) == len(yhat.shape) == 1, "y and yhat must be 1D arrays"
 
 		y, yhat, do_calculation = Metrics._get_non_null_samples( y, yhat )
 
+		metrics = cls(classes={'one'})
+
 		if not do_calculation:
-			return np.nan, np.nan, np.nan, np.nan
+			metrics.THRESHOLD, metrics.AUC, metrics.ACC, metrics.F1 = np.nan, np.nan, np.nan, np.nan
+			return metrics
 
 		def get_thresh() -> float:
 			def apply_roc() -> float:
@@ -276,8 +341,8 @@ class Metrics:
 				return th[np.argmax( f_score )]
 
 			func = { ThreshTechList.DEFAULT         : lambda: 0.5,
-					  ThreshTechList.ROC             : apply_roc,
-					  ThreshTechList.PRECISION_RECALL: apply_precision_recall }
+					ThreshTechList.ROC             : apply_roc,
+					ThreshTechList.PRECISION_RECALL: apply_precision_recall }
 
 			return func[thresh_technique]()
 
@@ -285,16 +350,28 @@ class Metrics:
 			return sklearn.metrics.roc_auc_score( y, yhat )
 
 		def get_acc() -> float:
-			return sklearn.metrics.accuracy_score( y, yhat >= threshold )
+			return sklearn.metrics.accuracy_score( y, yhat > metrics.THRESHOLD )
 
 		def get_f1() -> float:
-			return sklearn.metrics.f1_score( y, yhat >= threshold )
+			return sklearn.metrics.f1_score( y, yhat > metrics.THRESHOLD )
 
-		threshold = get_thresh() if (EvaluationMetricNames.THRESHOLD in evaluation_metrics) else np.nan
-		auc       = get_auc()	 if (EvaluationMetricNames.AUC in evaluation_metrics) else np.nan
-		acc       = get_acc() 	 if (EvaluationMetricNames.ACC in evaluation_metrics) else np.nan
-		f1        = get_f1() 	 if (EvaluationMetricNames.F1 in evaluation_metrics) else np.nan
-		return threshold, auc, acc, f1
+		metrics.THRESHOLD = get_thresh() if (EvaluationMetricNames.THRESHOLD in evaluation_metrics) else np.nan
+		metrics.AUC       = get_auc()	 if (EvaluationMetricNames.AUC in evaluation_metrics) else np.nan
+		metrics.ACC       = get_acc() 	 if (EvaluationMetricNames.ACC in evaluation_metrics) else np.nan
+		metrics.F1        = get_f1() 	 if (EvaluationMetricNames.F1 in evaluation_metrics) else np.nan
+		return metrics
+
+	@calculate.register(pd.Series)
+	@classmethod
+	@lru_cache(maxsize=50)
+	def _(cls, y: pd.Series, yhat: pd.Series, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
+		return cls.calculate( y=y.to_numpy(), yhat=yhat.to_numpy(), thresh_technique=thresh_technique, evaluation_metrics=evaluation_metrics )
+
+	@calculate.register(torch.Tensor)
+	@classmethod
+	@lru_cache(maxsize=50)
+	def _(cls, y: torch.Tensor, yhat: torch.Tensor, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
+		return cls.calculate( y=y.numpy(), yhat=yhat.numpy(), thresh_technique=thresh_technique, evaluation_metrics=evaluation_metrics )
 
 
 @dataclass
@@ -437,7 +514,7 @@ class LoadChestXrayDatasets:
 
 	def post_process_one_dataset(self) -> 'LoadChestXrayDatasets':
 
-		def update_empty_parent_class_based_on_its_children_classes() -> Optional:
+		def update_empty_parent_class_based_on_its_children_classes() -> Optional[None]:
 
 			# Updating the empty parent labels if at least one child label exist
 			if self.datasetInfo.datasetName not in [DatasetNames.PC , DatasetNames.NIH]:
@@ -628,7 +705,7 @@ class LoadSaveFile:
 
 def main():
 	config2 = Settings()
-	Train, Test = LoadChestXrayDatasets.load(config2)
+	_, Test = LoadChestXrayDatasets.load( config2 )
 
 	print('temp')
 

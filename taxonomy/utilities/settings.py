@@ -5,7 +5,8 @@ import sys
 from dataclasses import dataclass, field, InitVar
 from typing import Any, Union
 
-from pydantic import BaseModel, conint, confloat, Field, field_validator, FieldValidationInfo
+from pydantic import BaseModel, conint, confloat, Field, FieldValidationInfo
+from pydantic.functional_validators import field_validator
 
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, LossFunctionOptions, \
 	ModelWeightNames, \
