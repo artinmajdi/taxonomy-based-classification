@@ -20,7 +20,8 @@ from scipy import stats
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.data import Data, Findings, LoadChestXrayDatasets, LoadSaveFile, Metrics
+from taxonomy.utilities.data import Data,LoadChestXrayDatasets, LoadSaveFile
+from taxonomy.utilities.findings import Findings, Metrics
 from taxonomy.utilities.model import LoadModelXRV
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
@@ -32,7 +33,7 @@ device = 'cuda' if USE_CUDA else 'cpu'
 
 
 
-class CalculateOriginalFindings(LoadSaveFile):
+class CalculateOriginalFindings:
 
 	def __init__(self, data: Data, model: torch.nn.Module, config: Settings):
 		self.data = None
@@ -505,116 +506,6 @@ class MetricsAllTechniques:
 	def __post_init__(self):
 		self.metrics = self.auc_acc_f1.T[self.list_nodes_impacted].T.astype(float).round(3)
 
-	@property
-	def config(self):
-		return self.loss.config
-
-	@property
-	def list_nodes_impacted(self):
-		return self.logit.baseline.list_nodes_impacted
-
-
-	@staticmethod
-	def plot_roc_curves(logit: Metrics, thresh_technique: ThreshTechList, config: Settings, list_nodes_impacted: list, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
-
-		def save_plot():
-			save_path = config.PATH_LOCAL.joinpath( f'figures/roc_curve_all_datasets/{thresh_technique}/')
-			save_path.mkdir(parents=True, exist_ok=True)
-			for ft in ['png', 'eps', 'svg', 'pdf']:
-				plt.savefig(save_path.joinpath(
-					f'roc_curve_all_datasets.{ft}'), format=ft, dpi=300)
-
-		# Set up the grid
-		def setup_plot():
-
-			# Set a seaborn style for visually appealing plots
-			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
-
-			# Set up the grid
-			n_nodes, n_cols = len(list_nodes_impacted), 3
-			n_rows = int(np.ceil(n_nodes / n_cols))
-
-			# Set up the figure and axis
-			fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharey=True, sharex=True)  # type: ignore
-			axes     = axes.flatten()
-
-			return fig, axes, n_rows, n_cols
-
-		list_parent_nodes = set(Hierarchy.taxonomy_structure.keys()).intersection( set(logit.proposed.pred.columns))
-
-		fig, axes, n_rows, n_cols = setup_plot()
-
-		def plot_per_node(node, idx):
-
-			row_idx = idx // n_cols
-			col_idx = idx % n_cols
-			ax      = axes[idx]
-
-			# Calculate the ROC curve and AUC
-			def get_fpr_tpr_auc(pred_node, truth_node, technique: TechniqueNames, roc_auc):
-
-				def get():
-					# mask = ~truth_node.isnull()
-					mask = ~np.isnan(truth_node)
-					truth_notnull = truth_node[mask].to_numpy()
-
-					if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-						fpr, tpr, _ = sklearn.metrics.roc_curve(truth_notnull, pred_node[mask])
-						return fpr, tpr
-					return None, None
-
-				fpr, tpr =  get()
-				return sns.lineplot(x=fpr, y=tpr, label=f'{technique} AUC = {roc_auc:.2f}', linewidth=2, ax=ax)
-
-
-			# Plot the ROC curve
-			lines, labels = [], []
-
-			truth = logit.proposed.truth
-			for methodName in TechniqueNames.members():
-
-				data = getattr(self, methodName.lower())
-				technique = TechniqueNames[methodName]
-
-				line = get_fpr_tpr_auc(pred_node=data.pred[node], truth_node=truth[node], technique=technique, roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name])
-				lines.append(line.lines[-1])
-				labels.append(line.get_legend_handles_labels()[1][-1])
-
-			# Customize the plot
-			ax.plot([0, 1], [0, 1], linestyle='--', linewidth=2)
-			ax.set_xlabel('False Positive Rate', fontsize=fontsize, labelpad=labelpad) if row_idx == n_rows - 1 else ax.set_xticklabels([])
-			ax.set_ylabel('True Positive Rate', fontsize=fontsize, labelpad=labelpad) if col_idx == 0 else ax.set_yticklabels([])
-			ax.legend(loc='lower right', fontsize=12)
-			ax.set_xlim([0.0, 1.0 ])
-			ax.set_ylim([0.0, 1.05])
-
-			leg = ax.legend(lines, labels, loc='lower right', fontsize=fontsize, title=node)
-			plt.setp(leg.get_title(),fontsize=fontsize)
-
-			# Set the background color of the plot to gray if the node is a parent node
-			if node in list_parent_nodes:
-				ax.set_facecolor('xkcd:light grey')
-
-			fig.suptitle('ROC Curves', fontsize=int(1.5*fontsize), fontweight='bold')
-			plt.tight_layout()
-
-		def postprocess():
-			# Remove any empty plots in the grid
-			for empty_idx in range(idx + 1, n_rows * n_cols):
-				axes[empty_idx].axis('off')
-
-			plt.tight_layout()
-
-		# Loop through each disease and plot the ROC curve
-		for idx, node in enumerate(list_nodes_impacted):
-			plot_per_node(node, idx)
-
-		# Postprocess the plot
-		postprocess()
-
-		# Save the plot
-		if save_figure:
-			save_plot()
 
 
 @dataclass
@@ -706,7 +597,7 @@ class TaxonomyXRV:
 		data = self.train if data_mode == DataModes.TRAIN else self.test
 
 		# Getting the hierarchy_penalty for node
-		hierarchy_penalty = pd.DataFrame(columns=ThreshTechList)
+		hierarchy_penalty = pd.DataFrame(columns=ThreshTechList.members())
 		for x in ThreshTechList:
 			hierarchy_penalty[x] = data.hierarchy_penalty[x,node]
 

@@ -5,37 +5,21 @@ import json
 import pathlib
 import pickle
 from dataclasses import dataclass, field, InitVar
-from functools import cached_property, lru_cache, singledispatchmethod, wraps
-from typing import Any, Optional, Tuple, Union
+from functools import cached_property, singledispatchmethod, wraps
+from typing import Any, Optional, overload, Tuple, Union
 
 import networkx as nx
-import numpy as np
 import pandas as pd
-import sklearn
 import torch
 import torchvision
 import torchxrayvision as xrv
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader as torch_DataLoader
 
-from taxonomy.utilities.params import DatasetNames, EvaluationMetricNames, ExperimentStageNames, HyperparameterNames, \
-	ThreshTechList
+from taxonomy.utilities.params import DatasetNames, HyperparameterNames, ThreshTechList
 from taxonomy.utilities.settings import DatasetInfo, Settings
 
 USE_CUDA = torch.cuda.is_available()
-
-# @dataclass
-# class Labels:
-# 	LABEL_SET: Union[np.ndarray, pd.DataFrame]
-# 	classes  : set[str] = None
-#
-# 	def __post_init__(self):
-#
-# 		if isinstance(self.LABEL_SET, pd.DataFrame):
-# 			self.classes = set( self.LABEL_SET.columns.to_list() )
-# 		else:
-# 			assert self.classes is not None, "CLASSES must be provided if LABEL_SET is not a pandas DataFrame"
-# 			self.LABEL_SET = pd.DataFrame( self.LABEL_SET, columns=list( self.classes ) )
 
 @dataclass
 class Nodes:
@@ -173,13 +157,13 @@ class Nodes:
 						go.layout.Annotation(text=str(node), x=x, y=y, showarrow=False, font=dict(size=10, color='black')))
 
 			layout = go.Layout(title='Networkx DiGraph',
-							   showlegend = False,
-							   hovermode  = 'closest',
-							   margin     = dict(b    = 20, l = 5, r = 5, t = 40),
-							   xaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
-							   yaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
-							   annotations = annotations_list
-							   )
+								showlegend = False,
+								hovermode  = 'closest',
+								margin     = dict(b    = 20, l = 5, r = 5, t = 40),
+								xaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
+								yaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
+								annotations = annotations_list
+								)
 			fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
 			fig.show()
 
@@ -193,10 +177,10 @@ class Nodes:
 
 @dataclass
 class Data:
-	dataset    : xrv.datasets.Dataset
-	data_loader: torch_DataLoader = None
-	labels     : pd.DataFrame     = field(init=False)
-	nodes      : Nodes            = field(init=False)
+	dataset: xrv.datasets.Dataset
+	data_loader: torch_DataLoader = field( default=None )
+	labels: pd.DataFrame = field( init=False )
+	nodes: Nodes = field( init=False )
 
 	def __post_init__(self):
 		self.labels = Data.create_labels_dataframe(self.dataset)
@@ -212,201 +196,20 @@ class Data:
 
 
 @dataclass
-class DataAll:
-	train: Data = None
-	test : Data = None
-
-
-@dataclass
-class Metrics:
-	"""
-		A class for calculating evaluation metrics for binary classification tasks.
-
-		Attributes:
-		-----------
-		classes: set[str] or None
-			The set of class labels. If None, the class is assumed to be binary.
-		ACC: pd.Series or float
-			The accuracy score for each class.
-		AUC: pd.Series or float
-			The area under the ROC curve for each class.
-		F1: pd.Series or float
-			The F1 score for each class.
-		THRESHOLD: pd.Series or float
-			The decision threshold for each class.
-
-		Methods:
-		--------
-		calculate(truth_values, pred_values, thresh_technique='roc', evaluation_metrics=['threshold', 'auc', 'acc', 'f1'])
-			Calculate the evaluation metrics for the given truth and predicted values.
-	"""
-	classes     : InitVar[Union[set[str], None]]  = None
-	ACC         : Union[pd.Series, float]  = field(default=None)
-	AUC         : Union[pd.Series, float]  = field(default=None)
-	F1          : Union[pd.Series, float]  = field(default=None)
-	THRESHOLD   : Union[pd.Series, float]  = field(default=None)
-
-	def __post_init__(self, classes: set[str] = None):
-		"""
-			Initialize the Metrics object.
-
-			Parameters:
-			-----------
-			classes: set[str] or None
-				The set of class labels. If None, the class is assumed to be binary.
-		"""
-		def default():
-			condition = (classes is None) or (len(classes) == 1)
-			return np.nan if condition else pd.Series(index=list(classes), dtype=float)
-
-		self.ACC       = self.ACC or default()
-		self.AUC       = self.AUC or default()
-		self.F1        = self.F1  or default()
-		self.THRESHOLD = self.THRESHOLD or default()
-
-	@staticmethod
-	def _get_non_null_samples(y: np.ndarray, yhat: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
-		"""Filter out null samples and check if calculation should proceed."""
-
-		non_null = ~np.isnan( y )
-		y, yhat = y[non_null], yhat[non_null]
-
-		THERE_EXIST_NOTNULL_SAMPLES = (len(y) > 0)
-		THERE_ARE_TWO_CLASSES       = (np.unique(y).size == 2)
-		do_calculation              = THERE_EXIST_NOTNULL_SAMPLES and THERE_ARE_TWO_CLASSES
-		return y, yhat, do_calculation
-
-	@singledispatchmethod
-	@classmethod
-	def calculate(cls, truth_values: Any, pred_values: Any, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
-		raise NotImplementedError(f"Metrics not implemented for type {type(truth_values)}")
-
-	@calculate.register(pd.DataFrame)
-	@classmethod
-	@lru_cache(maxsize=50)
-	def _(cls, truth_values: pd.DataFrame, pred_values: pd.DataFrame, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
-		"""
-			Args:
-				truth_values (pd.DataFrame): The ground truth values.
-				pred_values (pd.DataFrame): The predicted values.
-				thresh_technique (ThreshTechList, optional): The threshold technique to use. Defaults to ThreshTechList.ROC.
-
-			Returns:
-				Metrics: The calculated metrics.
-
-			Examples:
-				```python
-				truth_values = pd.DataFrame(...)
-				pred_values = pd.DataFrame(...)
-				metrics = calculate(truth_values, pred_values)
-				print(metrics)
-				```
-		"""
-
-		metrics = cls(classes=truth_values.columns)
-
-		for n in truth_values.columns:
-			mts: Metrics = cls(classes=n).calculate( y=truth_values[n].to_numpy(), yhat=pred_values[n].to_numpy(), thresh_technique=thresh_technique)
-
-			metrics.THRESHOLD[n] = mts.THRESHOLD
-			metrics.AUC[n] 	     = mts.AUC
-			metrics.ACC[n] 	     = mts.ACC
-			metrics.F1[n] 	     = mts.F1
-
-		return metrics
-
-	@calculate.register(np.ndarray)
-	@classmethod
-	@lru_cache(maxsize=50)
-	def _(cls, y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
-
-		assert len(y.shape) == len(yhat.shape) == 1, "y and yhat must be 1D arrays"
-
-		y, yhat, do_calculation = Metrics._get_non_null_samples( y, yhat )
-
-		metrics = cls(classes={'one'})
-
-		if not do_calculation:
-			metrics.THRESHOLD, metrics.AUC, metrics.ACC, metrics.F1 = np.nan, np.nan, np.nan, np.nan
-			return metrics
-
-		def get_thresh() -> float:
-			def apply_roc() -> float:
-				fpr, tpr, th = sklearn.metrics.roc_curve( y, yhat )
-				return th[np.argmax( tpr - fpr )]
-
-			def apply_precision_recall() -> float:
-				ppv, recall, th = sklearn.metrics.precision_recall_curve( y, yhat )
-				f_score = 2 * (ppv * recall) / (ppv + recall)
-				return th[np.argmax( f_score )]
-
-			func = { ThreshTechList.DEFAULT         : lambda: 0.5,
-					ThreshTechList.ROC             : apply_roc,
-					ThreshTechList.PRECISION_RECALL: apply_precision_recall }
-
-			return func[thresh_technique]()
-
-		def get_auc() -> float:
-			return sklearn.metrics.roc_auc_score( y, yhat )
-
-		def get_acc() -> float:
-			return sklearn.metrics.accuracy_score( y, yhat > metrics.THRESHOLD )
-
-		def get_f1() -> float:
-			return sklearn.metrics.f1_score( y, yhat > metrics.THRESHOLD )
-
-		metrics.THRESHOLD = get_thresh() if (EvaluationMetricNames.THRESHOLD in evaluation_metrics) else np.nan
-		metrics.AUC       = get_auc()	 if (EvaluationMetricNames.AUC in evaluation_metrics) else np.nan
-		metrics.ACC       = get_acc() 	 if (EvaluationMetricNames.ACC in evaluation_metrics) else np.nan
-		metrics.F1        = get_f1() 	 if (EvaluationMetricNames.F1 in evaluation_metrics) else np.nan
-		return metrics
-
-	@calculate.register(pd.Series)
-	@classmethod
-	@lru_cache(maxsize=50)
-	def _(cls, y: pd.Series, yhat: pd.Series, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
-		return cls.calculate( y=y.to_numpy(), yhat=yhat.to_numpy(), thresh_technique=thresh_technique, evaluation_metrics=evaluation_metrics )
-
-	@calculate.register(torch.Tensor)
-	@classmethod
-	@lru_cache(maxsize=50)
-	def _(cls, y: torch.Tensor, yhat: torch.Tensor, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
-		return cls.calculate( y=y.numpy(), yhat=yhat.numpy(), thresh_technique=thresh_technique, evaluation_metrics=evaluation_metrics )
-
-
-@dataclass
-class ModelOutputs:
-	""" Class for storing model-related findings. """
-	truth_values: pd.DataFrame = field(default_factory = pd.DataFrame)
-	loss_values : pd.DataFrame = field(default_factory = pd.DataFrame)
-	logit_values: pd.DataFrame = field(default_factory = pd.DataFrame)
-	pred_values : pd.DataFrame = field(default_factory = pd.DataFrame)
-
-
-@dataclass
-class Findings:
-	""" Class for storing overall findings including configuration, data, and metrics. """
-	config         : Settings
-	data           : Data
-	model          : torch.nn.Module
-	modelOutputs   : ModelOutputs = None
-	metrics        : Metrics      = None
-	experimentStage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
-
-	def __post_init__(self):
-		self.modelOutputs = ModelOutputs()
-		self.metrics      = Metrics( classes=self.data.labels.classes )
+class DataTrainTest:
+	train: Data = field(default=None)
+	test : Data = field(default=None)
 
 
 @dataclass
 class LoadChestXrayDatasets:
-	config     : Settings
+	config: Settings
 	datasetInfo: DatasetInfo
-	dataset    : xrv.datasets.Dataset = None
-	labels     : pd.DataFrame         = None
-	nodes      : Nodes                = None
-	train      : Data                 = None
-	test       : Data                 = None
+	dataset: xrv.datasets.Dataset = None
+	labels: pd.DataFrame = None
+	nodes: Nodes = None
+	train: Data = None
+	test: Data = None
 
 	def __post_init__(self):
 		self.labels = Data.create_labels_dataframe(self.dataset)
@@ -554,6 +357,9 @@ class LoadChestXrayDatasets:
 
 		return self
 
+	def get_dataset_unfiltered(self):
+		return self.load_raw_database().relabel_raw_database().dataset
+
 	@staticmethod
 	def train_test_split(config, dataset) -> Tuple[xrv.datasets.Dataset, xrv.datasets.Dataset]:
 
@@ -578,7 +384,7 @@ class LoadChestXrayDatasets:
 		return LoadChestXrayDatasets.train_test_split(config=self.config, dataset=self.dataset)
 
 	@classmethod
-	def load(cls, config: Settings) -> DataAll:
+	def load(cls, config: Settings) -> DataTrainTest:
 
 		dt_train_list = []
 		dt_test_list  = []
@@ -594,7 +400,7 @@ class LoadChestXrayDatasets:
 
 		train = Data( dataset = dataset_train, data_loader = dataloader_train)
 		test  = Data( dataset = dataset_test , data_loader = dataloader_test )
-		return DataAll( train=train, test=test )
+		return DataTrainTest( train=train, test=test )
 
 	@staticmethod
 	def create_dataloader(config, dataset):
@@ -626,81 +432,75 @@ def check_file_exist(func):
 		return func(self, file_path, *args, **kwargs)
 	return wrapper
 
-
-def create_file_path_if_not_exist(func):
-	@wraps(func)
-	def wrapper(self, file_path: Union[str, pathlib.Path], *args, **kwargs):
-		file_path = pathlib.Path(file_path)
-		file_path.parent.mkdir(parents=True, exist_ok=True)
-		return func(self, file_path, *args, **kwargs)
-	return wrapper
-
-
 class LoadSaveFile:
 
-	@check_file_exist
-	def load(self, file_path: Union[str, pathlib.Path], **kwargs) -> Union[dict, pd.DataFrame, plt.Figure]:
+	def __init__(self, file_path: Union[str, pathlib.Path]):
+		self.file_path = pathlib.Path(file_path)
+		self.file_path.is_dir()  and self.file_path.mkdir(parents=True, exist_ok=True)
+		self.file_path.is_file() and self.file_path.parent.mkdir(parents=True, exist_ok=True)
 
-		if file_path.suffix == '.pkl':
-			with open(file_path, 'rb') as f:
+	def load(self, **kwargs) -> Union[dict, pd.DataFrame, plt.Figure]:
+
+		if self.file_path.suffix == '.pkl':
+			with open(self.file_path, 'rb') as f:
 				return pickle.load(f)
 
-		if file_path.suffix == '.json':
-			with open(file_path, 'r') as f:
+		if self.file_path.suffix == '.json':
+			with open(self.file_path, 'r') as f:
 				return json.load(f)
 
-		if file_path.suffix == '.csv':
-			return pd.read_csv(file_path, **kwargs)
+		if self.file_path.suffix == '.csv':
+			return pd.read_csv(self.file_path, **kwargs)
 
-		if file_path.suffix == '.xlsx':
-			return pd.read_excel(file_path, **kwargs)
+		if self.file_path.suffix == '.xlsx':
+			return pd.read_excel(self.file_path, **kwargs)
 
-		if file_path.suffix == '.png':
-			return plt.imread(file_path)
+		if self.file_path.suffix == '.png':
+			return plt.imread(self.file_path)
 
-		if file_path.suffix == '.tif':
-			return plt.imread(file_path)
+		if self.file_path.suffix == '.tif':
+			return plt.imread(self.file_path)
 
-		raise NotImplementedError(f'file_type {file_path.suffix} is not supported')
+		raise NotImplementedError(f'file_type {self.file_path.suffix} is not supported')
 
 	@singledispatchmethod
-	@create_file_path_if_not_exist
-	def save(self, data: Any, file_path: Union[str, pathlib.Path], **kwargs):
+	def save(self, data: Any, **kwargs):
 		raise NotImplementedError(f'file_type {type(data)} is not supported')
 
 	@save.register(dict)
-	def _(self, data: dict, file_path: Union[str, pathlib.Path], **kwargs) -> None:
-		assert file_path.suffix in {'.pkl', '.json'}, ValueError( f'file type {file_path.suffix} is not supported' )
+	def _(self, data: dict, **kwargs) -> None:
 
-		if file_path.suffix == '.pkl':
-			with open(file_path, 'wb') as f:
+		assert self.file_path.suffix in {'.pkl', '.json'}, ValueError( f'file type {self.file_path.suffix} is not supported' )
+
+		if self.file_path.suffix == '.pkl':
+			with open(self.file_path, 'wb') as f:
 				pickle.dump(data, f)
 
-		elif file_path.suffix == '.json':
-			with open(file_path, 'w') as f:
+		elif self.file_path.suffix == '.json':
+			with open(self.file_path, 'w') as f:
 				json.dump(data, f)
 
-		elif file_path.suffix == '.xlsx':
+		elif self.file_path.suffix == '.xlsx':
 			# Recursively call 'save' but with a DataFrame object
-			self.save(pd.DataFrame.from_dict(data), file_path, **kwargs)
+			self.save(pd.DataFrame.from_dict(data), self.file_path, **kwargs)
 
 	@save.register(pd.Series)
-	def _(self, data: pd.Series, file_path: Union[str, pathlib.Path], **kwargs):
-		assert file_path.suffix == '.csv', ValueError(f'file type {file_path.suffix} is not supported')
-		data.to_csv(file_path, **kwargs)
+	def _(self, data: pd.Series, **kwargs):
+		assert self.file_path.suffix == '.csv', ValueError(f'file type {self.file_path.suffix} is not supported')
+		data.to_csv(self.file_path, **kwargs)
 
 	@save.register(pd.DataFrame)
-	def _(self, data: pd.DataFrame, file_path: Union[str, pathlib.Path], **kwargs) -> None:
-		assert file_path.suffix == '.xlsx', ValueError(f'file type {file_path.suffix} is not supported')
-		data.to_excel(file_path, **kwargs)
+	def _(self, data: pd.DataFrame, **kwargs) -> None:
+		assert self.file_path.suffix == '.xlsx', ValueError(f'file type {self.file_path.suffix} is not supported')
+		data.to_excel(self.file_path, **kwargs)
 
 	@save.register(plt.Figure)
-	def _(self, data: plt.Figure, file_path: Union[str, pathlib.Path], file_format: Union[str, list[str]] = None, **kwargs):
-		file_format = file_format or [file_path.suffix]
+	def _(self, data: plt.Figure, file_format: Union[str, list[str]] = None, **kwargs):
+		file_format = file_format or [self.file_path.suffix]
 		file_format = [file_format] if isinstance(file_format, str) else file_format
 
 		for fmt in (fmt if fmt.startswith('.') else f'.{fmt}' for fmt in file_format):
-			data.savefig(file_path.with_suffix(fmt), format=fmt.lstrip('.'), dpi=300, **kwargs)
+			data.savefig(self.file_path.with_suffix(fmt), format=fmt.lstrip('.'), dpi=300, **kwargs)
 
 
 def main():
@@ -708,6 +508,7 @@ def main():
 	_, Test = LoadChestXrayDatasets.load( config2 )
 
 	print('temp')
+
 
 if __name__ == '__main__':
 	main()

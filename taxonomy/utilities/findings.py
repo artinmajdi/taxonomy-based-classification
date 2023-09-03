@@ -1,33 +1,387 @@
-import itertools
-import pathlib
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field, InitVar
+from functools import cache, lru_cache, singledispatchmethod
+from typing import Any, NamedTuple, Tuple, Union
 
 import numpy as np
 import pandas as pd
+import sklearn
 import seaborn as sns
-import umap
+import torch
 from matplotlib import pyplot as plt
 
-from taxonomy.utilities.data import Findings, LoadChestXrayDatasets, LoadSaveFile, Metrics
-from taxonomy.utilities.model import LoadModelXRV
-from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
+from taxonomy.utilities.data import Data, LoadSaveFile
+from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
-from taxonomy.utilities.settings import get_settings, Settings
-from taxonomy.utilities.utils import TaxonomyXRV
+from taxonomy.utilities.settings import Settings
 
 
-def calculating_threshold_and_metrics(config: Settings, findings: Findings) -> Findings:
+def get_non_null_samples(y: np.ndarray, yhat: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
+	"""Filter out null samples and check if calculation should proceed."""
 
-	findings.metrics = Metrics.calculate_metrics(truth_values=findings.modelOutputs.truth_values, pred_values=findings.modelOutputs.pred_values, thresh_technique=config.hyperparameter_tuning.thresh_technique)
+	non_null = ~np.isnan( y )
+	y, yhat = y[non_null], yhat[non_null]
+
+	THERE_EXIST_NOTNULL_SAMPLES = (len(y) > 0)
+	THERE_ARE_TWO_CLASSES       = (np.unique(y).size == 2)
+	do_calculation              = THERE_EXIST_NOTNULL_SAMPLES and THERE_ARE_TWO_CLASSES
+	return y, yhat, do_calculation
+
+@dataclass
+class CalculateROC:
+	y        : InitVar[np.ndarray]
+	yhat     : InitVar[np.ndarray]
+	APPLY_TO_NON_NULL_SAMPLES: InitVar[bool] = False
+	THRESHOLD: float               = field(default = None)
+	FPR      : np.ndarray          = field(default = None)
+	TPR      : np.ndarray          = field(default = None)
+
+	def __post_init__(self, y, yhat, APPLY_TO_NON_NULL_SAMPLES = False):
+
+		do_calculation = True
+		if APPLY_TO_NON_NULL_SAMPLES:
+			y, yhat, do_calculation = get_non_null_samples( y, yhat )
+
+		if do_calculation:
+			fpr, tpr, thr = sklearn.metrics.roc_curve( y, yhat )
+			self.FPR, self.TPR, self.THRESHOLD = fpr, tpr, thr[np.argmax( tpr - fpr )]
 
 
+@dataclass
+class CalculatePrecisionRecall:
+	y        : InitVar[np.ndarray]
+	yhat     : InitVar[np.ndarray]
+	APPLY_TO_NON_NULL_SAMPLES: InitVar[bool] = False
+	THRESHOLD: float               = field(default = None)
+	PPV      : np.ndarray          = field(default = None)
+	RECALL   : np.ndarray          = field(default = None)
+	F_SCORE  : np.ndarray          = field(default = None)
+
+	def __post_init__(self, y, yhat, APPLY_TO_NON_NULL_SAMPLES = False):
+
+		do_calculation = True
+		if APPLY_TO_NON_NULL_SAMPLES:
+			y, yhat, do_calculation = get_non_null_samples( y, yhat )
+
+		if do_calculation:
+			ppv, recall, th = sklearn.metrics.precision_recall_curve( y, yhat )
+			f_score = 2 * (ppv * recall) / (ppv + recall)
+			self.THRESHOLD, self.PPV, self.RECALL, self.F_SCORE = th[np.argmax( f_score )], ppv, recall, f_score
+
+
+def calculate_threshold(y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList = ThreshTechList.ROC, APPLY_TO_NON_NULL_SAMPLES: bool=False) -> float:
+
+	if thresh_technique == ThreshTechList.DEFAULT:
+		return 0.5
+
+	params = dict(y=y, yhat=yhat, APPLY_TO_NON_NULL_SAMPLES=APPLY_TO_NON_NULL_SAMPLES)
+	if thresh_technique == ThreshTechList.ROC:
+		return CalculateROC(**params).THRESHOLD
+
+	if thresh_technique == ThreshTechList.PRECISION_RECALL:
+		return CalculatePrecisionRecall(**params).THRESHOLD
+
+	raise NotImplementedError(f"ThreshTechList {thresh_technique} not implemented")
+
+
+@dataclass
+class Metrics:
+	"""
+		A class for calculating evaluation metrics for binary classification tasks.
+
+		Attributes:
+		-----------
+		classes: set[str] or None
+			The set of class labels. If None, the class is assumed to be binary.
+		ACC: pd.Series or float
+			The accuracy score for each class.
+		AUC: pd.Series or float
+			The area under the ROC curve for each class.
+		F1: pd.Series or float
+			The F1 score for each class.
+		THRESHOLD: pd.Series or float
+			The decision threshold for each class.
+
+		Methods:
+		--------
+		calculate(truth_values, pred_values, thresh_technique='roc', evaluation_metrics=['threshold', 'auc', 'acc', 'f1'])
+			Calculate the evaluation metrics for the given truth and predicted values.
+	"""
+	classes     : InitVar[Union[set[str], None]]  = None
+	ACC         : Union[pd.Series, float]  = field(default=None)
+	AUC         : Union[pd.Series, float]  = field(default=None)
+	F1          : Union[pd.Series, float]  = field(default=None)
+	THRESHOLD   : Union[pd.Series, float]  = field(default=None)
+
+	def __post_init__(self, classes: set[str] = None):
+		"""
+			Initialize the Metrics object.
+
+			Parameters:
+			-----------
+			classes: set[str] or None
+				The set of class labels. If None, the class is assumed to be binary.
+		"""
+		def default():
+			condition = (classes is None) or (len(classes) == 1)
+			return np.nan if condition else pd.Series(index=list(classes), dtype=float)
+
+		self.ACC       = self.ACC or default()
+		self.AUC       = self.AUC or default()
+		self.F1        = self.F1  or default()
+		self.THRESHOLD = self.THRESHOLD or default()
+
+
+	@singledispatchmethod
+	@classmethod
+	@lru_cache(maxsize=50)
+	def calculate(cls, truth_values: Any, pred_values: Any, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
+		raise NotImplementedError(f"Metrics not implemented for type {type(truth_values)}")
+
+	@calculate.register(pd.DataFrame)
+	@classmethod
+	@lru_cache(maxsize=50)
+	def _(cls, truth_values: pd.DataFrame, pred_values: pd.DataFrame, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
+		"""
+			Args:
+				truth_values (pd.DataFrame): The ground truth values.
+				pred_values (pd.DataFrame): The predicted values.
+				thresh_technique (ThreshTechList, optional): The threshold technique to use. Defaults to ThreshTechList.ROC.
+
+			Returns:
+				Metrics: The calculated metrics.
+
+			Examples:
+				```python
+				truth_values = pd.DataFrame(...)
+				pred_values = pd.DataFrame(...)
+				metrics = calculate(truth_values, pred_values)
+				print(metrics)
+				```
+		"""
+
+		metrics = cls(classes=truth_values.columns)
+
+		for n in truth_values.columns:
+			mts: Metrics = cls(classes=n).calculate( y=truth_values[n].to_numpy(), yhat=pred_values[n].to_numpy(), thresh_technique=thresh_technique)
+
+			metrics.THRESHOLD[n] = mts.THRESHOLD
+			metrics.AUC[n] 	     = mts.AUC
+			metrics.ACC[n] 	     = mts.ACC
+			metrics.F1[n] 	     = mts.F1
+
+		return metrics
+
+	@calculate.register(np.ndarray)
+	@classmethod
+	@lru_cache(maxsize=50)
+	def _(cls, y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
+
+		assert len(y.shape) == len(yhat.shape) == 1, "y and yhat must be 1D arrays"
+
+		y, yhat, do_calculation = get_non_null_samples( y, yhat )
+
+		metrics = cls(classes={'one'})
+
+		if not do_calculation:
+			metrics.THRESHOLD, metrics.AUC, metrics.ACC, metrics.F1 = np.nan, np.nan, np.nan, np.nan
+			return metrics
+
+		def get_thresh() -> float:
+
+			if thresh_technique == ThreshTechList.DEFAULT:
+				return 0.5
+
+			if thresh_technique == ThreshTechList.ROC:
+				return CalculateROC(y=y, yhat=yhat).THRESHOLD
+
+			if thresh_technique == ThreshTechList.PRECISION_RECALL:
+				return CalculatePrecisionRecall(y=y, yhat=yhat).THRESHOLD
+
+		def get_auc() -> float:
+			return sklearn.metrics.roc_auc_score( y, yhat )
+
+		def get_acc() -> float:
+			return sklearn.metrics.accuracy_score( y, yhat > metrics.THRESHOLD )
+
+		def get_f1() -> float:
+			return sklearn.metrics.f1_score( y, yhat > metrics.THRESHOLD )
+
+		metrics.THRESHOLD = get_thresh() if (EvaluationMetricNames.THRESHOLD in evaluation_metrics) else np.nan
+		metrics.AUC       = get_auc()	 if (EvaluationMetricNames.AUC       in evaluation_metrics) else np.nan
+		metrics.ACC       = get_acc() 	 if (EvaluationMetricNames.ACC		 in evaluation_metrics) else np.nan
+		metrics.F1        = get_f1() 	 if (EvaluationMetricNames.F1 		 in evaluation_metrics) else np.nan
+		return metrics
+
+	@calculate.register(pd.Series)
+	@classmethod
+	@lru_cache(maxsize=50)
+	def _(cls, y: pd.Series, yhat: pd.Series, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
+		return cls.calculate( y=y.to_numpy(), yhat=yhat.to_numpy(), thresh_technique=thresh_technique, evaluation_metrics=evaluation_metrics )
+
+	@calculate.register(torch.Tensor)
+	@classmethod
+	@lru_cache(maxsize=50)
+	def _(cls, y: torch.Tensor, yhat: torch.Tensor, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
+		return cls.calculate( y=y.numpy(), yhat=yhat.numpy(), thresh_technique=thresh_technique, evaluation_metrics=evaluation_metrics )
+
+
+@dataclass
+class ModelOutputs:
+	""" Class for storing model-related findings. """
+	truth_values: pd.DataFrame = field(default_factory = pd.DataFrame)
+	loss_values : pd.DataFrame = field(default_factory = pd.DataFrame)
+	logit_values: pd.DataFrame = field(default_factory = pd.DataFrame)
+	pred_values : pd.DataFrame = field(default_factory = pd.DataFrame)
+
+
+@dataclass
+class Findings:
+	""" Class for storing overall findings including configuration, data, and metrics. """
+	config: Settings
+	data: Data
+	model: torch.nn.Module
+	modelOutputs: ModelOutputs = None
+	metrics: Metrics = None
+	experimentStage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
+
+	def __post_init__(self):
+		self.modelOutputs = ModelOutputs()
+		self.metrics      = Metrics( classes=self.data.labels.classes )
+
+
+@dataclass
+class FindingsTrainTest:
+	train: Findings = field(default = None)
+	test : Findings = field(default = None)
+
+
+@dataclass
+class FindingsAllTechniques:
+	loss    : FindingsTrainTest = field(default=None)
+	logit   : FindingsTrainTest = field(default=None)
+	baseline: FindingsTrainTest = field(default=None)
+
+	def _get_obj(self):
+		for objName in ['loss', 'logit', 'baseline']:
+			obj = getattr(self, objName)
+			if obj is not None:
+				return obj
+		raise ValueError( 'No suitable object has been initialized. Please initialize either "baseline", "loss", or "logit".')
+
+	@property
+	def nodes(self):
+		return self._get_obj().test.data.nodes
+
+	@property
+	def config(self):
+		return self._get_obj().test.config
+
+	def plot_roc_curves(self, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
+
+		impacted_nodes    = self.nodes.IMPACTED
+		list_parent_nodes = list(self.nodes.taxonomy.keys())
+		truth             = self.baseline.test.modelOutputs.truth_values
+
+		# Set up the grid
+		def setup_plot():
+
+			# Set a seaborn style for visually appealing plots
+			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
+
+			# Set up the grid
+			n_nodes, n_cols = len(impacted_nodes), 3
+			n_rows = int(np.ceil(n_nodes / n_cols))
+
+			# Set up the figure and axis
+			fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharey=True, sharex=True)  # type: ignore
+			axes     = axes.flatten()
+
+			return fig, axes, n_rows, n_cols
+
+		fig, axes, n_rows, n_cols = setup_plot()
+
+		def plot_per_node(node, idx):
+
+			row_idx = idx // n_cols
+			col_idx = idx % n_cols
+			ax      = axes[idx]
+
+			# Calculate the ROC curve and AUC
+			def get_fpr_tpr_auc(pred_node, truth_node, technique: TechniqueNames, roc_auc):
+
+				def get():
+					# mask = ~truth_node.isnull()
+					mask = ~np.isnan(truth_node)
+					truth_notnull = truth_node[mask].to_numpy()
+
+					if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
+						fpr, tpr, _ = sklearn.metrics.roc_curve(truth_notnull, pred_node[mask])
+						return fpr, tpr
+					return None, None
+
+				fpr, tpr =  get()
+				return sns.lineplot(x=fpr, y=tpr, label=f'{technique} AUC = {roc_auc:.2f}', linewidth=2, ax=ax)
+
+
+			# Plot the ROC curve
+			lines, labels = [], []
+
+
+			for methodName in TechniqueNames.members():
+
+				data = getattr(self, methodName.lower())
+				technique = TechniqueNames[methodName]
+
+				line = get_fpr_tpr_auc(pred_node=data.pred[node], truth_node=truth[node], technique=technique, roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name])
+				lines.append(line.lines[-1])
+				labels.append(line.get_legend_handles_labels()[1][-1])
+
+			# Customize the plot
+			ax.plot([0, 1], [0, 1], linestyle='--', linewidth=2)
+			ax.set_xlabel('False Positive Rate', fontsize=fontsize, labelpad=labelpad) if row_idx == n_rows - 1 else ax.set_xticklabels([])
+			ax.set_ylabel('True Positive Rate', fontsize=fontsize, labelpad=labelpad) if col_idx == 0 else ax.set_yticklabels([])
+			ax.legend(loc='lower right', fontsize=12)
+			ax.set_xlim([0.0, 1.0 ])
+			ax.set_ylim([0.0, 1.05])
+
+			leg = ax.legend(lines, labels, loc='lower right', fontsize=fontsize, title=node)
+			plt.setp(leg.get_title(),fontsize=fontsize)
+
+			# Set the background color of the plot to gray if the node is a parent node
+			if node in list_parent_nodes:
+				ax.set_facecolor('xkcd:light grey')
+
+			fig.suptitle('ROC Curves', fontsize=int(1.5*fontsize), fontweight='bold')
+			plt.tight_layout()
+
+		def postprocess():
+			# Remove any empty plots in the grid
+			for empty_idx in range(idx + 1, n_rows * n_cols):
+				axes[empty_idx].axis('off')
+
+			plt.tight_layout()
+
+		# Loop through each disease and plot the ROC curve
+		for idx, node in enumerate(self.nodes.IMPACTED):
+			plot_per_node(node, idx)
+
+		# Postprocess the plot
+		postprocess()
+
+		# Save the plot
+		if save_figure:
+			file_path = findings.config.output.path / f'figures/roc_curve_all_datasets/{findings.config.hyperparameter_tuning.thresh_technique}/roc_curve_all_datasets.png'
+			LoadSaveFile(file_path).save(data=fig)
+
+'''
 class Tables:
 
 	def __init__(self, jupyter=True, **kwargs):
 		self.config = get_settings(jupyter=jupyter, **kwargs)
 
 	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode=DataModes.TEST.value, thresh_technique='DEFAULT'):
+
+		from taxonomy.utilities.utils import TaxonomyXRV
 
 		save_path = self.config.PATH_LOCAL.joinpath(
 			f'tables/metrics_per_dataset/{thresh_technique}/metrics_{data_mode}.xlsx')
@@ -91,11 +445,7 @@ class Tables:
 	@staticmethod
 	def get_dataset_unfiltered(**kwargs):
 		config = get_settings(**kwargs)
-		LD = LoadChestXrayDatasets( config=config , datasetInfo=config.dataset.datasetInfoList[0])
-		LD.load_raw_database()
-		LD.relabel_raw_database()
-		LD.update_empty_parent_class_based_on_its_children_classes()
-		return LD
+		return LoadChestXrayDatasets( config=config, datasetInfo=config.dataset.datasetInfoList[0]).get_dataset_unfiltered()
 
 	def get_table_datasets_samples(self, save_table=True):
 
@@ -127,7 +477,7 @@ class Tables:
 			df[(mode, dname)] = get_PA_AP(mode=mode, dname=dname)
 
 		if save_table:
-			LoadSaveFile.save(data=df, file_path=save_path)
+			LoadSaveFile(file_path).save(data=df)
 
 		return df
 
@@ -208,13 +558,9 @@ class Visualize:
 
 	def plot_metrics_all_thresh_techniques(self, save_figure=False):
 
-		def save_plot():
-			save_path = self.config.PATH_LOCAL / 'final/metrics_all_datasets/fig_metrics_AUC_ACC_F1_all_thresh_techniques/'
-			save_path.mkdir(parents=True, exist_ok=True)
-			for ft in ['png', 'eps', 'svg', 'pdf']:
-				plt.savefig(save_path.joinpath(f'metrics_AUC_ACC_F1.{ft}'), format=ft, dpi=300)
-
 		def get_metrics():
+			from taxonomy.utilities.utils import TaxonomyXRV
+
 			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), TechniqueNames.members()])
 			metric_df = {}
 			for thresh_technique in ThreshTechList:
@@ -230,29 +576,29 @@ class Visualize:
 
 			return metric_df
 
-		def plot():
-			metric_df = get_metrics()
-			fig, axes = plt.subplots(3, 3, figsize=(21, 21), sharey=True, sharex=True)  # type: ignore
-			sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True,
-			              rc=None)
+		metric_df = get_metrics()
+		fig, axes = plt.subplots(3, 3, figsize=(21, 21), sharey=True, sharex=True)  # type: ignore
+		sns.set_theme(style="darkgrid", palette='deep', font='sans-serif', font_scale=1.5, color_codes=True,
+					  rc=None)
 
-			params = dict(legend=False, fontsize=16, kind='barh')
-			for i, thresh_technique in enumerate(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
-				metric_df[thresh_technique][EvaluationMetricNames.ACC.name].plot(ax=axes[i, 0],
-				                                                                 xlabel=EvaluationMetricNames.ACC.name,
-				                                                                 ylabel=thresh_technique, **params)
-				metric_df[thresh_technique][EvaluationMetricNames.AUC.name].plot(ax=axes[i, 1],
-				                                                                 xlabel=EvaluationMetricNames.AUC.name,
-				                                                                 ylabel=thresh_technique, **params)
-				metric_df[thresh_technique][EvaluationMetricNames.F1.name].plot(ax=axes[i, 2],
-				                                                                xlabel=EvaluationMetricNames.F1.name,
-				                                                                ylabel=thresh_technique, **params)
+		params = dict(legend=False, fontsize=16, kind='barh')
+		for i, thresh_technique in enumerate(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
+			metric_df[thresh_technique][EvaluationMetricNames.ACC.name].plot(ax=axes[i, 0],
+																			 xlabel=EvaluationMetricNames.ACC.name,
+																			 ylabel=thresh_technique, **params)
+			metric_df[thresh_technique][EvaluationMetricNames.AUC.name].plot(ax=axes[i, 1],
+																			 xlabel=EvaluationMetricNames.AUC.name,
+																			 ylabel=thresh_technique, **params)
+			metric_df[thresh_technique][EvaluationMetricNames.F1.name].plot(ax=axes[i, 2],
+																			xlabel=EvaluationMetricNames.F1.name,
+																			ylabel=thresh_technique, **params)
 
-			plt.legend(loc='lower right', fontsize=16)
-			plt.tight_layout()
+		plt.legend(loc='lower right', fontsize=16)
+		plt.tight_layout()
 
-		plot()
-		if save_figure: save_plot()
+		if save_figure:
+			save_path = self.config.output.path / 'final/metrics_all_datasets/fig_metrics_AUC_ACC_F1_all_thresh_techniques/metrics_AUC_ACC_F1.png'
+			LoadSaveFile(file_path).save(data=fig, file_format=['png', 'eps', 'svg', 'pdf'])
 
 
 	@staticmethod
@@ -295,3 +641,5 @@ class Visualize:
 
 		if save_figure:
 			save_plot()
+
+'''

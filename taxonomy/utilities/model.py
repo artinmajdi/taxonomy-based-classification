@@ -7,7 +7,7 @@ import torch
 from tqdm import tqdm
 
 import torchxrayvision as xrv
-from taxonomy.utilities.data import Data, DataAll
+from taxonomy.utilities.data import Data, DataTrainTest
 from taxonomy.utilities.params import DataModes, ModelWeightNames
 from taxonomy.utilities.settings import Settings
 
@@ -66,7 +66,7 @@ class LoadModelXRV:
 
 		def _get_data() -> Data:
 			from taxonomy.utilities.data import LoadChestXrayDatasets
-			LD: DataAll = LoadChestXrayDatasets.load( config=config )
+			LD: DataTrainTest = LoadChestXrayDatasets.load( config=config )
 			return LD.train if data_mode is DataModes.TRAIN else LD.test
 
 		model: ModelType = cls(config = config).load().model

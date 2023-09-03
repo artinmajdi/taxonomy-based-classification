@@ -64,7 +64,8 @@ class DatasetSettings(BaseModel):
 	data_mode        : DataModes    = DataModes.TRAIN
 	views            : list[str]    = Field(default_factory = lambda: ['PA', 'AP'])
 	path_all_datasets: pathlib.Path = pathlib.Path('./datasets')
-	datasetInfoList  : list[DatasetNames] = Field( default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT])
+	datasetNames  : list[DatasetNames] = Field( default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT])
+	datasetInfoList: list[DatasetInfo] = Field(default=None)
 	non_null_samples: bool          = True
 	max_samples      : conint(gt=0) = 1000
 	train_test_ratio : confloat(ge=0, le=1) = 0.7
@@ -76,13 +77,13 @@ class DatasetSettings(BaseModel):
 
 	@field_validator('datasetInfoList', mode='after')
 	@classmethod
-	def post_process_info(cls, v: list[DatasetNames], info: FieldValidationInfo) -> list[DatasetInfo]:
+	def post_process_info(cls, v: None, info: FieldValidationInfo) -> list[DatasetInfo]:
 		"""	Convert the list of dataset names to a list of DatasetInfo objects	"""
 		return [ DatasetInfo(   path_all_datasets = info.data['path_all_datasets'],
 								data_mode         = info.data['data_mode'],
 								views 			  = info.data['views'],
 								datasetName       = DatasetNames(dt))
-				 for dt in v]
+				 for dt in info.data['datasetNames']]
 
 class TrainingSettings(BaseModel):
 	criterion	      : LossFunctionOptions = LossFunctionOptions.BCE
@@ -232,8 +233,8 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 
 def main():
 	config = get_settings()
-	print('sometjhong')
 	print(config.dataset.datasetInfoList)
+	print('sometjhong')
 
 if __name__ == '__main__':
 	main()
