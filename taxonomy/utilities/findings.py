@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, InitVar
-from functools import cache, lru_cache, singledispatchmethod
+from functools import cache, lru_cache, singledispatchmethod, wraps
 from typing import Any, NamedTuple, Tuple, Union
 
 import numpy as np
@@ -25,6 +25,41 @@ def get_non_null_samples(y: np.ndarray, yhat: np.ndarray) -> Tuple[np.ndarray, n
 	THERE_ARE_TWO_CLASSES       = (np.unique(y).size == 2)
 	do_calculation              = THERE_EXIST_NOTNULL_SAMPLES and THERE_ARE_TWO_CLASSES
 	return y, yhat, do_calculation
+
+def remove_null_samples(func):
+	""" A decorator to remove null samples from the input numpy arrays `y` and `yhat`. """
+
+	@wraps(func)
+	def wrapper(*args, **kwargs):
+
+		def get_y_yhat():
+			nonlocal args, y, yhat
+			# Extract y and yhat from keyword arguments
+			y, yhat = kwargs.get('y'), kwargs.get('yhat')
+
+			# If y and yhat are not passed as keyword arguments, attempt to get them from positional arguments.
+			if y is None and args:
+				y, *args = args
+
+			if yhat is None and args:
+				yhat, *args = args
+
+			return y, yhat
+
+		y, yhat = get_y_yhat()
+		assert (y is not None) and (yhat is not None), "y and yhat must be passed as keyword arguments or positional arguments"
+		assert y.size == yhat.size, "y and yhat must have the same number of samples"
+		assert type(y) == type(yhat), "y and yhat must be of the same type"
+		assert isinstance( y, (np.ndarray, pd.Series) ), "y and yhat must be numpy arrays or pandas series"
+
+		# Remove null values
+		non_null = ~np.isnan( y ) if isinstance(y, np.ndarray) else y.notnull()
+
+		kwargs['y'], kwargs['yhat'] = y[non_null], yhat[non_null]
+		return func(*args, **kwargs)
+
+	return wrapper
+
 
 @dataclass
 class CalculateROC:
@@ -70,10 +105,17 @@ class CalculatePrecisionRecall:
 
 def calculate_threshold(y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList = ThreshTechList.ROC, APPLY_TO_NON_NULL_SAMPLES: bool=False) -> float:
 
+	do_calculation = True
+	if APPLY_TO_NON_NULL_SAMPLES:
+		y, yhat, do_calculation = get_non_null_samples( y, yhat )
+
+	if not do_calculation:
+		return np.nan
+
 	if thresh_technique == ThreshTechList.DEFAULT:
 		return 0.5
 
-	params = dict(y=y, yhat=yhat, APPLY_TO_NON_NULL_SAMPLES=APPLY_TO_NON_NULL_SAMPLES)
+	params = dict(y=y, yhat=yhat, APPLY_TO_NON_NULL_SAMPLES=False)
 	if thresh_technique == ThreshTechList.ROC:
 		return CalculateROC(**params).THRESHOLD
 
@@ -81,6 +123,21 @@ def calculate_threshold(y: np.ndarray, yhat: np.ndarray, thresh_technique: Thres
 		return CalculatePrecisionRecall(**params).THRESHOLD
 
 	raise NotImplementedError(f"ThreshTechList {thresh_technique} not implemented")
+
+
+def calculate_evaluation_metrics(y: np.ndarray, yhat: np.ndarray, evaluationMetricName: EvaluationMetricNames, APPLY_TO_NON_NULL_SAMPLES: bool, threshold: float=0.5) -> float:
+
+	if evaluationMetricName == EvaluationMetricNames.AUC:
+		return sklearn.metrics.roc_auc_score( y, yhat )
+
+	if evaluationMetricName == EvaluationMetricNames.ACC:
+		return sklearn.metrics.accuracy_score( y, yhat > threshold )
+
+	if evaluationMetricName == EvaluationMetricNames.F1:
+		sklearn.metrics.f1_score( y, yhat > threshold )
+
+
+
 
 
 @dataclass
@@ -186,27 +243,16 @@ class Metrics:
 			metrics.THRESHOLD, metrics.AUC, metrics.ACC, metrics.F1 = np.nan, np.nan, np.nan, np.nan
 			return metrics
 
-		def get_thresh() -> float:
-
-			if thresh_technique == ThreshTechList.DEFAULT:
-				return 0.5
-
-			if thresh_technique == ThreshTechList.ROC:
-				return CalculateROC(y=y, yhat=yhat).THRESHOLD
-
-			if thresh_technique == ThreshTechList.PRECISION_RECALL:
-				return CalculatePrecisionRecall(y=y, yhat=yhat).THRESHOLD
-
 		def get_auc() -> float:
-			return sklearn.metrics.roc_auc_score( y, yhat )
+			return
 
 		def get_acc() -> float:
-			return sklearn.metrics.accuracy_score( y, yhat > metrics.THRESHOLD )
+
 
 		def get_f1() -> float:
-			return sklearn.metrics.f1_score( y, yhat > metrics.THRESHOLD )
+			return
 
-		metrics.THRESHOLD = get_thresh() if (EvaluationMetricNames.THRESHOLD in evaluation_metrics) else np.nan
+		metrics.THRESHOLD = calculate_threshold(y, yhat, thresh_technique, APPLY_TO_NON_NULL_SAMPLES=False) if (EvaluationMetricNames.THRESHOLD in evaluation_metrics) else np.nan
 		metrics.AUC       = get_auc()	 if (EvaluationMetricNames.AUC       in evaluation_metrics) else np.nan
 		metrics.ACC       = get_acc() 	 if (EvaluationMetricNames.ACC		 in evaluation_metrics) else np.nan
 		metrics.F1        = get_f1() 	 if (EvaluationMetricNames.F1 		 in evaluation_metrics) else np.nan
@@ -322,10 +368,8 @@ class FindingsAllTechniques:
 				fpr, tpr =  get()
 				return sns.lineplot(x=fpr, y=tpr, label=f'{technique} AUC = {roc_auc:.2f}', linewidth=2, ax=ax)
 
-
 			# Plot the ROC curve
 			lines, labels = [], []
-
 
 			for methodName in TechniqueNames.members():
 
