@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field, InitVar
-from functools import cache, lru_cache, singledispatchmethod, wraps
-from typing import Any, NamedTuple, Tuple, Union
+from functools import cache, cached_property, lru_cache, singledispatchmethod, wraps
+from typing import Any, NamedTuple, Optional, Tuple, TypeAlias, Union
 
 import numpy as np
 import pandas as pd
@@ -14,261 +14,191 @@ from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageName
 	TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import Settings
 
+Array_Series: TypeAlias = Union[np.ndarray, pd.Series]
 
-def get_non_null_samples(y: np.ndarray, yhat: np.ndarray) -> Tuple[np.ndarray, np.ndarray, bool]:
-	"""Filter out null samples and check if calculation should proceed."""
+def get_y_yhat_flag(*args, **kwargs) -> Tuple[Array_Series, Array_Series, bool]:
+	""" Extract y and yhat from keyword arguments or positional arguments. """
 
-	non_null = ~np.isnan( y )
-	y, yhat = y[non_null], yhat[non_null]
+	# Extract y and yhat from keyword arguments
+	y, yhat, RAISE_ValueError_IF_EMPTY = kwargs.get('y'), kwargs.get('yhat'), kwargs.get('RAISE_ValueError_IF_EMPTY', False)
 
-	THERE_EXIST_NOTNULL_SAMPLES = (len(y) > 0)
-	THERE_ARE_TWO_CLASSES       = (np.unique(y).size == 2)
-	do_calculation              = THERE_EXIST_NOTNULL_SAMPLES and THERE_ARE_TWO_CLASSES
-	return y, yhat, do_calculation
+	# If y and yhat are not passed as keyword arguments, attempt to get them from positional arguments.
+	if y is None and args:
+		y, *args = args
 
-def remove_null_samples(func):
-	""" A decorator to remove null samples from the input numpy arrays `y` and `yhat`. """
+	if yhat is None and args:
+		yhat, *args = args
 
+	return y, yhat, RAISE_ValueError_IF_EMPTY
+
+
+def validating_label_vectors_decorator(func):
 	@wraps(func)
 	def wrapper(*args, **kwargs):
 
-		def get_y_yhat():
-			nonlocal args, y, yhat
-			# Extract y and yhat from keyword arguments
-			y, yhat = kwargs.get('y'), kwargs.get('yhat')
+		y, yhat, _ = get_y_yhat_flag(*args, **kwargs)
 
-			# If y and yhat are not passed as keyword arguments, attempt to get them from positional arguments.
-			if y is None and args:
-				y, *args = args
+		if y is None or yhat is None:
+			raise ValueError("y and yhat must be passed as keyword arguments or positional arguments")
 
-			if yhat is None and args:
-				yhat, *args = args
+		if y.shape != yhat.shape:
+			raise ValueError("y and yhat must have the same shape")
 
-			return y, yhat
+		if y.dtype != yhat.dtype:
+			raise ValueError("y and yhat must be of the same type")
 
-		y, yhat = get_y_yhat()
-		assert (y is not None) and (yhat is not None), "y and yhat must be passed as keyword arguments or positional arguments"
-		assert y.size == yhat.size, "y and yhat must have the same number of samples"
-		assert type(y) == type(yhat), "y and yhat must be of the same type"
-		assert isinstance( y, (np.ndarray, pd.Series) ), "y and yhat must be numpy arrays or pandas series"
+		if not isinstance(y, (np.ndarray, pd.Series)):
+			raise ValueError("y and yhat must be numpy arrays or pandas series")
 
-		# Remove null values
-		non_null = ~np.isnan( y ) if isinstance(y, np.ndarray) else y.notnull()
+		if isinstance(y, np.ndarray) and len(y.shape) == 2:
+			if y.shape[1] != 1:
+				raise ValueError("y & yhat must be 1D arrays")
+			y    = y.flatten()
+			yhat = yhat.flatten()
 
-		kwargs['y'], kwargs['yhat'] = y[non_null], yhat[non_null]
+		kwargs['y'], kwargs['yhat'] = y, yhat
 		return func(*args, **kwargs)
-
 	return wrapper
 
 
+@validating_label_vectors_decorator
+def remove_null_samples(y: Array_Series, yhat: Array_Series, RAISE_ValueError_IF_EMPTY: bool=False) -> Tuple[Array_Series, Array_Series]:
+	""" Filter out null samples and check if calculation should proceed. """
+
+	non_null = ~np.isnan( y ) if isinstance(y, np.ndarray) else y.notnull()
+
+	if RAISE_ValueError_IF_EMPTY and (not non_null.any()):
+		raise ValueError("y and yhat must contain at least one non-null value")
+
+	return y[non_null], yhat[non_null]
+
+
 @dataclass
-class CalculateROC:
-	y        : InitVar[np.ndarray]
-	yhat     : InitVar[np.ndarray]
-	APPLY_TO_NON_NULL_SAMPLES: InitVar[bool] = False
-	THRESHOLD: float               = field(default = None)
-	FPR      : np.ndarray          = field(default = None)
-	TPR      : np.ndarray          = field(default = None)
+class ROC:
+	y          : np.ndarray
+	yhat       : np.ndarray
+	REMOVE_NULL: bool       = True
+	THRESHOLD  : float      = field(default = None)
+	FPR        : np.ndarray = field(default = None)
+	TPR        : np.ndarray = field(default = None)
 
-	def __post_init__(self, y, yhat, APPLY_TO_NON_NULL_SAMPLES = False):
+	def __post_init__(self):
+		if self.REMOVE_NULL:
+			self.y, self.yhat = remove_null_samples( y=self.y, yhat=self.yhat, RAISE_ValueError_IF_EMPTY=False )
 
-		do_calculation = True
-		if APPLY_TO_NON_NULL_SAMPLES:
-			y, yhat, do_calculation = get_non_null_samples( y, yhat )
-
-		if do_calculation:
-			fpr, tpr, thr = sklearn.metrics.roc_curve( y, yhat )
+	def calculate(self) -> 'ROC':
+		if self.y.size > 0:
+			fpr, tpr, thr = sklearn.metrics.roc_curve( self.y, self.yhat )
 			self.FPR, self.TPR, self.THRESHOLD = fpr, tpr, thr[np.argmax( tpr - fpr )]
-
+		return self
 
 @dataclass
-class CalculatePrecisionRecall:
-	y        : InitVar[np.ndarray]
-	yhat     : InitVar[np.ndarray]
-	APPLY_TO_NON_NULL_SAMPLES: InitVar[bool] = False
-	THRESHOLD: float               = field(default = None)
-	PPV      : np.ndarray          = field(default = None)
-	RECALL   : np.ndarray          = field(default = None)
-	F_SCORE  : np.ndarray          = field(default = None)
+class PrecisionRecall:
+	y          : np.ndarray
+	yhat       : np.ndarray
+	REMOVE_NULL: bool       = True
+	THRESHOLD  : float      = field(default = None)
+	PPV        : np.ndarray = field(default = None)
+	RECALL     : np.ndarray = field(default = None)
+	F_SCORE    : np.ndarray = field(default = None)
 
-	def __post_init__(self, y, yhat, APPLY_TO_NON_NULL_SAMPLES = False):
+	def __post_init__(self):
+		if self.REMOVE_NULL:
+			self.y, self.yhat = remove_null_samples( y=self.y, yhat=self.yhat, RAISE_ValueError_IF_EMPTY=False )
 
-		do_calculation = True
-		if APPLY_TO_NON_NULL_SAMPLES:
-			y, yhat, do_calculation = get_non_null_samples( y, yhat )
-
-		if do_calculation:
-			ppv, recall, th = sklearn.metrics.precision_recall_curve( y, yhat )
+	def calculate(self) -> 'PrecisionRecall':
+		if self.y.size > 0:
+			ppv, recall, th = sklearn.metrics.precision_recall_curve( self.y, self.yhat )
 			f_score = 2 * (ppv * recall) / (ppv + recall)
 			self.THRESHOLD, self.PPV, self.RECALL, self.F_SCORE = th[np.argmax( f_score )], ppv, recall, f_score
+		return self
 
 
-def calculate_threshold(y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList = ThreshTechList.ROC, APPLY_TO_NON_NULL_SAMPLES: bool=False) -> float:
+@dataclass
+class CalculateMetrics:
+	y               : np.ndarray
+	yhat            : np.ndarray
+	REMOVE_NULL     : bool           = True
+	thresh_technique: ThreshTechList = ThreshTechList.ROC
 
-	do_calculation = True
-	if APPLY_TO_NON_NULL_SAMPLES:
-		y, yhat, do_calculation = get_non_null_samples( y, yhat )
+	def __post_init__(self):
+		if self.REMOVE_NULL:
+			self.y, self.yhat = remove_null_samples( y=self.y, yhat=self.yhat, RAISE_ValueError_IF_EMPTY=False )
 
-	if not do_calculation:
-		return np.nan
+	@cached_property
+	def THRESHOLD(self) -> float:
 
-	if thresh_technique == ThreshTechList.DEFAULT:
-		return 0.5
+		if self.thresh_technique == ThreshTechList.DEFAULT:
+			return 0.5
 
-	params = dict(y=y, yhat=yhat, APPLY_TO_NON_NULL_SAMPLES=False)
-	if thresh_technique == ThreshTechList.ROC:
-		return CalculateROC(**params).THRESHOLD
+		if self.thresh_technique == ThreshTechList.ROC:
+			return ROC(y=self.y, yhat=self.yhat, REMOVE_NULL=False).calculate().THRESHOLD
 
-	if thresh_technique == ThreshTechList.PRECISION_RECALL:
-		return CalculatePrecisionRecall(**params).THRESHOLD
+		if self.thresh_technique == ThreshTechList.PRECISION_RECALL:
+			return PrecisionRecall(y=self.y, yhat=self.yhat, REMOVE_NULL=False).calculate().THRESHOLD
 
-	raise NotImplementedError(f"ThreshTechList {thresh_technique} not implemented")
+		raise NotImplementedError(f"ThreshTechList {self.thresh_technique} not implemented")
 
+	@cached_property
+	def AUC(self) -> float:
+		return sklearn.metrics.roc_auc_score( self.y, self.yhat )
 
-def calculate_evaluation_metrics(y: np.ndarray, yhat: np.ndarray, evaluationMetricName: EvaluationMetricNames, APPLY_TO_NON_NULL_SAMPLES: bool, threshold: float=0.5) -> float:
+	@cached_property
+	def ACC(self) -> float:
+		return sklearn.metrics.accuracy_score( self.y, self.yhat > self.THRESHOLD )
 
-	if evaluationMetricName == EvaluationMetricNames.AUC:
-		return sklearn.metrics.roc_auc_score( y, yhat )
-
-	if evaluationMetricName == EvaluationMetricNames.ACC:
-		return sklearn.metrics.accuracy_score( y, yhat > threshold )
-
-	if evaluationMetricName == EvaluationMetricNames.F1:
-		sklearn.metrics.f1_score( y, yhat > threshold )
-
+	@cached_property
+	def F1(self) -> float:
+		return sklearn.metrics.f1_score( self.y, self.yhat > self.THRESHOLD )
 
 
+Array_Series_DataFrame: TypeAlias = Union[np.ndarray, pd.Series, pd.DataFrame]
 
 
 @dataclass
 class Metrics:
-	"""
-		A class for calculating evaluation metrics for binary classification tasks.
+	ACC      : Union[pd.Series, float] = field(default = None)
+	AUC      : Union[pd.Series, float] = field(default = None)
+	F1       : Union[pd.Series, float] = field(default = None)
+	THRESHOLD: Union[pd.Series, float] = field(default = None)
 
-		Attributes:
-		-----------
-		classes: set[str] or None
-			The set of class labels. If None, the class is assumed to be binary.
-		ACC: pd.Series or float
-			The accuracy score for each class.
-		AUC: pd.Series or float
-			The area under the ROC curve for each class.
-		F1: pd.Series or float
-			The F1 score for each class.
-		THRESHOLD: pd.Series or float
-			The decision threshold for each class.
+	def _calculate_1D_data(self, y: np.ndarray, yhat: np.ndarray, REMOVE_NULL: bool=True, thresh_technique: ThreshTechList=ThreshTechList.ROC) -> 'Metrics':
 
-		Methods:
-		--------
-		calculate(truth_values, pred_values, thresh_technique='roc', evaluation_metrics=['threshold', 'auc', 'acc', 'f1'])
-			Calculate the evaluation metrics for the given truth and predicted values.
-	"""
-	classes     : InitVar[Union[set[str], None]]  = None
-	ACC         : Union[pd.Series, float]  = field(default=None)
-	AUC         : Union[pd.Series, float]  = field(default=None)
-	F1          : Union[pd.Series, float]  = field(default=None)
-	THRESHOLD   : Union[pd.Series, float]  = field(default=None)
+		calculateMetrics = CalculateMetrics(y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL, thresh_technique=thresh_technique)
 
-	def __post_init__(self, classes: set[str] = None):
-		"""
-			Initialize the Metrics object.
+		self.THRESHOLD = calculateMetrics.THRESHOLD
+		self.AUC       = calculateMetrics.AUC
+		self.ACC       = calculateMetrics.ACC
+		self.F1        = calculateMetrics.F1
+		return self
 
-			Parameters:
-			-----------
-			classes: set[str] or None
-				The set of class labels. If None, the class is assumed to be binary.
-		"""
-		def default():
-			condition = (classes is None) or (len(classes) == 1)
-			return np.nan if condition else pd.Series(index=list(classes), dtype=float)
-
-		self.ACC       = self.ACC or default()
-		self.AUC       = self.AUC or default()
-		self.F1        = self.F1  or default()
-		self.THRESHOLD = self.THRESHOLD or default()
-
-
-	@singledispatchmethod
 	@classmethod
-	@lru_cache(maxsize=50)
-	def calculate(cls, truth_values: Any, pred_values: Any, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
-		raise NotImplementedError(f"Metrics not implemented for type {type(truth_values)}")
+	def calculate(cls, y: Array_Series_DataFrame, yhat: Array_Series_DataFrame, REMOVE_NULL: bool=True, thresh_technique: ThreshTechList=ThreshTechList.ROC) -> 'Metrics':
 
-	@calculate.register(pd.DataFrame)
-	@classmethod
-	@lru_cache(maxsize=50)
-	def _(cls, truth_values: pd.DataFrame, pred_values: pd.DataFrame, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
-		"""
-			Args:
-				truth_values (pd.DataFrame): The ground truth values.
-				pred_values (pd.DataFrame): The predicted values.
-				thresh_technique (ThreshTechList, optional): The threshold technique to use. Defaults to ThreshTechList.ROC.
+		if isinstance(y, pd.Series):
+			y, yhat = y.to_numpy(), yhat.to_numpy()
 
-			Returns:
-				Metrics: The calculated metrics.
+		if isinstance(y, np.ndarray):
+			return cls()._calculate_1D_data(y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL, thresh_technique=thresh_technique)
 
-			Examples:
-				```python
-				truth_values = pd.DataFrame(...)
-				pred_values = pd.DataFrame(...)
-				metrics = calculate(truth_values, pred_values)
-				print(metrics)
-				```
-		"""
+		elif isinstance(y, pd.DataFrame):
+			metrics = cls()
+			metrics.THRESHOLD = pd.Series(index=y.columns)
+			metrics.AUC       = pd.Series(index=y.columns)
+			metrics.ACC       = pd.Series(index=y.columns)
+			metrics.F1        = pd.Series(index=y.columns)
 
-		metrics = cls(classes=truth_values.columns)
+			for clm in y.columns:
+				mts = cls()._calculate_1D_data(y=y[clm], yhat=yhat[clm], REMOVE_NULL=REMOVE_NULL, thresh_technique=thresh_technique)
 
-		for n in truth_values.columns:
-			mts: Metrics = cls(classes=n).calculate( y=truth_values[n].to_numpy(), yhat=pred_values[n].to_numpy(), thresh_technique=thresh_technique)
+				metrics.THRESHOLD[clm] = mts.THRESHOLD
+				metrics.AUC[clm]       = mts.AUC
+				metrics.ACC[clm]       = mts.ACC
+				metrics.F1[clm]        = mts.F1
 
-			metrics.THRESHOLD[n] = mts.THRESHOLD
-			metrics.AUC[n] 	     = mts.AUC
-			metrics.ACC[n] 	     = mts.ACC
-			metrics.F1[n] 	     = mts.F1
-
-		return metrics
-
-	@calculate.register(np.ndarray)
-	@classmethod
-	@lru_cache(maxsize=50)
-	def _(cls, y: np.ndarray, yhat: np.ndarray, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
-
-		assert len(y.shape) == len(yhat.shape) == 1, "y and yhat must be 1D arrays"
-
-		y, yhat, do_calculation = get_non_null_samples( y, yhat )
-
-		metrics = cls(classes={'one'})
-
-		if not do_calculation:
-			metrics.THRESHOLD, metrics.AUC, metrics.ACC, metrics.F1 = np.nan, np.nan, np.nan, np.nan
 			return metrics
 
-		def get_auc() -> float:
-			return
-
-		def get_acc() -> float:
-
-
-		def get_f1() -> float:
-			return
-
-		metrics.THRESHOLD = calculate_threshold(y, yhat, thresh_technique, APPLY_TO_NON_NULL_SAMPLES=False) if (EvaluationMetricNames.THRESHOLD in evaluation_metrics) else np.nan
-		metrics.AUC       = get_auc()	 if (EvaluationMetricNames.AUC       in evaluation_metrics) else np.nan
-		metrics.ACC       = get_acc() 	 if (EvaluationMetricNames.ACC		 in evaluation_metrics) else np.nan
-		metrics.F1        = get_f1() 	 if (EvaluationMetricNames.F1 		 in evaluation_metrics) else np.nan
-		return metrics
-
-	@calculate.register(pd.Series)
-	@classmethod
-	@lru_cache(maxsize=50)
-	def _(cls, y: pd.Series, yhat: pd.Series, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
-		return cls.calculate( y=y.to_numpy(), yhat=yhat.to_numpy(), thresh_technique=thresh_technique, evaluation_metrics=evaluation_metrics )
-
-	@calculate.register(torch.Tensor)
-	@classmethod
-	@lru_cache(maxsize=50)
-	def _(cls, y: torch.Tensor, yhat: torch.Tensor, thresh_technique: ThreshTechList, evaluation_metrics: list[EvaluationMetricNames]=EvaluationMetricNames.all()) -> 'Metrics':
-		return cls.calculate( y=y.numpy(), yhat=yhat.numpy(), thresh_technique=thresh_technique, evaluation_metrics=evaluation_metrics )
+		raise NotImplementedError(f"Metrics not implemented for type {type(y)}")
 
 
 @dataclass
