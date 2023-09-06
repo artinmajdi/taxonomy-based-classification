@@ -1,4 +1,4 @@
-import argparse
+import concurrent.futures
 import concurrent.futures
 import contextlib
 import multiprocessing
@@ -11,56 +11,53 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 import pandas as pd
 import pingouin as pg
-import seaborn as sns
 import sklearn
 import torch
+import torchxrayvision as xrv
 from hyperopt import fmin, hp, tpe
-from matplotlib import pyplot as plt
 from scipy import stats
 from tqdm import tqdm
 
-import torchxrayvision as xrv
-from taxonomy.utilities.data import Data,LoadChestXrayDatasets, LoadSaveFile
-from taxonomy.utilities.findings import Findings, Metrics
-from taxonomy.utilities.model import LoadModelXRV
+from taxonomy.utilities.data import Data, LoadChestXrayDatasets, LoadSaveFile
+from taxonomy.utilities.findings import Findings, Metrics, ModelOutputs
+from taxonomy.utilities.model import LoadModelXRV, ModelType
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
-	TechniqueNames, ThreshTechList
+	SimulationOptions, TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import get_settings, Settings
 
 USE_CUDA = torch.cuda.is_available()
 device = 'cuda' if USE_CUDA else 'cpu'
 
-
-
-
+@dataclass
 class CalculateOriginalFindings:
+	config: Settings
+	data  : Data
+	model : ModelType
 
-	def __init__(self, data: Data, model: torch.nn.Module, config: Settings):
-		self.data = None
-		self.findings_original = Findings(data=data, model=model, config=config)
-		self.save_path_full    = config.output.path / 'details' / 'baseline' / 'findings_original.pkl'
+	def __post_init__(self):
+		self.findings = Findings( config = self.config,
+								  data   = self.data,
+								  model  = self.model,
+								  experiment_stage = ExperimentStageNames.ORIGINAL )
 
-	def calculate(self, data: Data,) -> Data:
+	def calculate(self) -> 'CalculateOriginalFindings':
 
-		data               = self.findings_original.data
-		model              = self.findings_original.model
-		pathologies        = self.findings_original.model.pathologies
-		loss_function      = self.findings_original.config.training.criterion.function
-		batches_to_process = self.findings_original.config.training.batches_to_process
-		modelFindings      = self.findings_original.modelOutputs
+		pathologies        = self.model.pathologies
+		loss_function      = self.config.training.criterion.function
+		batches_to_process = self.config.training.batches_to_process
+		model_outputs      = ModelOutputs()
+		self.model.eval()
 
-		model.eval()
+		def process_one_batch(batch_data_in) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
-		def process_one_batch(batch_data_in):
-
-			def get_truth_and_predictions():
+			def get_truth_and_predictions() -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
 				# Sample data and its corresponding labels
 				images = batch_data_in["img"].to(device)
 				truth  = batch_data_in["lab"].to(device)
 
 				# Feeding the samples into the model
-				logit = self.findings_original.model(images)
+				logit = self.findings.model( images )
 				pred  = torch.sigmoid(logit) # .detach().numpy()
 
 				return pred , logit , truth
@@ -71,7 +68,7 @@ class CalculateOriginalFindings:
 			# Getting the index of the samples for this batch
 			index = batch_data_in['idx'].detach().cpu().numpy()
 
-			def get_loss_per_sample_batch():
+			def get_loss_per_sample_batch() -> pd.DataFrame:
 				nonlocal pred_batch, truth_batch, index
 
 				l_batch = pd.DataFrame(columns=pathologies, index=index)
@@ -91,66 +88,56 @@ class CalculateOriginalFindings:
 			loss_per_sample_batch = get_loss_per_sample_batch()
 
 			# Converting the outputs and targets to dataframes
-			# to_df = lambda data: pd.DataFrame(data.detach().cpu().numpy(), columns=model.pathologies, index=index)
-			to_df = lambda data_tensor: pd.DataFrame(data_tensor.detach().cpu(), columns=model.pathologies, index=index)
+			def to_df(data_tensor: torch.Tensor):
+				return pd.DataFrame(data_tensor.detach().cpu(), columns=self.model.pathologies, index=index)
 
 			return to_df(pred_batch), to_df(logit_batch), to_df(truth_batch), loss_per_sample_batch
 
 		def looping_over_all_batches() -> None:
 
-			for batch_idx, batch_data in enumerate(data.data_loader):
+			for batch_idx, batch_data in enumerate(self.data.data_loader):
 
-				# This ensures that we only evaluate the data for a few batches. End the loop after n_batches_to_process
 				if batch_idx >= batches_to_process: break
 
-				pred, logit, truth, loss = process_one_batch(batch_data)
+				pred_values, logit_values, truth_values, loss_values = process_one_batch(batch_data)
 
 				# Appending the results for this batch to the results
-				modelFindings.pred_values  = pd.concat([modelFindings.pred_values , pred ])
-				modelFindings.logit_values = pd.concat([modelFindings.logit_values, logit])
-				modelFindings.truth_values = pd.concat([modelFindings.truth_values, truth])
-				modelFindings.loss_values  = pd.concat([modelFindings.loss_values , loss ])
+				model_outputs.pred_values  = pd.concat([model_outputs.pred_values , pred_values ])
+				model_outputs.logit_values = pd.concat([model_outputs.logit_values, logit_values])
+				model_outputs.truth_values = pd.concat([model_outputs.truth_values, truth_values])
+				model_outputs.loss_values  = pd.concat([model_outputs.loss_values , loss_values ])
 
 		with torch.no_grad():
 
 			# Looping over all batches
 			looping_over_all_batches()
 
-			# Measuring AUCs & Thresholds
-			data.ORIGINAL = TaxonomyXRV.calculating_threshold_and_metrics(data.ORIGINAL)
+			# Adding model outputs to the findings.
+			self.findings.model_outputs = model_outputs
 
-		data.ORIGINAL.results = {key: getattr( data.ORIGINAL, key ) for key in ['metrics', 'pred', 'logit', 'truth', 'loss']}
-		return data
+			self.findings.metrics = Metrics.calculate(config=self.config, REMOVE_NULL=True, model_outputs=self.findings.model_outputs)
 
-	def do_calculate(self):
+		return self
 
-		# Calculating the ORIGINAL findings
-		params = {key: getattr(self, key) for key in ['data', 'model', 'device' , 'criterion']}
-		self.data = CalculateOriginalFindings.calculate(**params)
+	def save(self) -> 'CalculateOriginalFindings':
 
-		# Adding the ORIGINAL findings to the graph nodes
-		self.data.Hierarchy_cls.update_graph( findings_original=self.data.ORIGINAL.results )
+		# Saving model_outputs to disc
+		self.findings.model_outputs.save(config=self.config, experiment_stage=ExperimentStageNames.ORIGINAL)
 
-		# Saving the results
-		LoadSaveFindings(self.config, self.save_path_full).save( self.data.ORIGINAL.results )
+		# Calculating the metrics & saving them to disc
+		self.findings.metrics.save(config=self.config, experiment_stage=ExperimentStageNames.ORIGINAL)
 
-	@classmethod
-	def get_updated_data(cls, config, data, model):
-		""" Getting the ORIGINAL predication probabilities """
+		return self
 
-		# Initializing the class
-		OG = cls(data=data, model=model, config=config, criterion=torch.nn.BCELoss(reduction='none'))
+	def load(self) -> 'CalculateOriginalFindings':
 
-		if config.do_findings_original == 'calculate':
-			OG.do_calculate()
-		else:
-			OG.data.ORIGINAL.results = LoadSaveFindings( config, OG.save_path_full ).load(
-			)
+		# Loading model_outputs from disc
+		self.findings.model_outputs = ModelOutputs().load(config=self.config, experiment_stage=ExperimentStageNames.ORIGINAL)
 
-			# Adding the ORIGINAL findings to the graph nodes
-			OG.data.Hierarchy_cls.update_graph( findings_original=OG.data.ORIGINAL.results )
+		# Loading the metrics from disc
+		self.findings.metrics = Metrics().load(config=self.config, experiment_stage=ExperimentStageNames.ORIGINAL)
 
-		return OG.data
+		return self
 
 
 class CalculateNewFindings:
@@ -492,27 +479,6 @@ def deserialize_object(state, cls):
 		else:
 			setattr(obj, attr, value)
 	return obj
-
-
-@dataclass
-class MetricsAllTechniques:
-	loss            : Metrics
-	logit           : Metrics
-	auc_acc_f1      : pd.DataFrame
-	thresh_technique: str
-	datasets_list   : List[str]
-	data_mode       : str
-
-	def __post_init__(self):
-		self.metrics = self.auc_acc_f1.T[self.list_nodes_impacted].T.astype(float).round(3)
-
-
-
-@dataclass
-class MetricsAllTechniqueThresholds:
-	DEFAULT: 		  MetricsAllTechniques
-	ROC: 			  MetricsAllTechniques
-	PRECISION_RECALL: MetricsAllTechniques
 
 
 class TaxonomyXRV:

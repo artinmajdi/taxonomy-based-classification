@@ -13,6 +13,7 @@ from taxonomy.utilities.settings import Settings
 
 USE_CUDA = torch.cuda.is_available()
 
+
 @dataclass
 class LossFunctionOptions:
 	binary_crossentropy: torch.nn.BCELoss(reduction='none')
@@ -21,6 +22,7 @@ class LossFunctionOptions:
 
 
 ModelType: TypeAlias = Union[xrv.models.DenseNet, xrv.models.ResNet]
+
 
 @dataclass
 class LoadModelXRV:

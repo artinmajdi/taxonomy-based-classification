@@ -1,26 +1,29 @@
-from dataclasses import dataclass, field, InitVar
-from functools import cache, cached_property, lru_cache, singledispatchmethod, wraps
-from typing import Any, NamedTuple, Optional, Tuple, TypeAlias, Union
+from dataclasses import dataclass, field
+from functools import cached_property, singledispatch, singledispatchmethod, wraps
+from typing import Optional, Tuple, TypeAlias, Union
 
 import numpy as np
 import pandas as pd
-import sklearn
 import seaborn as sns
-import torch
+import sklearn
+import torchxrayvision as xrv
 from matplotlib import pyplot as plt
 
 from taxonomy.utilities.data import Data, LoadSaveFile
 from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import Settings
+from taxonomy.utilities.model import ModelType
 
 Array_Series: TypeAlias = Union[np.ndarray, pd.Series]
+
 
 def get_y_yhat_flag(*args, **kwargs) -> Tuple[Array_Series, Array_Series, bool]:
 	""" Extract y and yhat from keyword arguments or positional arguments. """
 
 	# Extract y and yhat from keyword arguments
-	y, yhat, RAISE_ValueError_IF_EMPTY = kwargs.get('y'), kwargs.get('yhat'), kwargs.get('RAISE_ValueError_IF_EMPTY', False)
+	y, yhat, RAISE_ValueError_IF_EMPTY = kwargs.get( 'y' ), kwargs.get( 'yhat' ), kwargs.get(
+		'RAISE_ValueError_IF_EMPTY', False )
 
 	# If y and yhat are not passed as keyword arguments, attempt to get them from positional arguments.
 	if y is None and args:
@@ -33,54 +36,56 @@ def get_y_yhat_flag(*args, **kwargs) -> Tuple[Array_Series, Array_Series, bool]:
 
 
 def validating_label_vectors_decorator(func):
-	@wraps(func)
+	@wraps( func )
 	def wrapper(*args, **kwargs):
 
-		y, yhat, _ = get_y_yhat_flag(*args, **kwargs)
+		y, yhat, _ = get_y_yhat_flag( *args, **kwargs )
 
 		if y is None or yhat is None:
-			raise ValueError("y and yhat must be passed as keyword arguments or positional arguments")
+			raise ValueError( "y and yhat must be passed as keyword arguments or positional arguments" )
 
 		if y.shape != yhat.shape:
-			raise ValueError("y and yhat must have the same shape")
+			raise ValueError( "y and yhat must have the same shape" )
 
 		if y.dtype != yhat.dtype:
-			raise ValueError("y and yhat must be of the same type")
+			raise ValueError( "y and yhat must be of the same type" )
 
-		if not isinstance(y, (np.ndarray, pd.Series)):
-			raise ValueError("y and yhat must be numpy arrays or pandas series")
+		if not isinstance( y, (np.ndarray, pd.Series) ):
+			raise ValueError( "y and yhat must be numpy arrays or pandas series" )
 
-		if isinstance(y, np.ndarray) and len(y.shape) == 2:
+		if isinstance( y, np.ndarray ) and len( y.shape ) == 2:
 			if y.shape[1] != 1:
-				raise ValueError("y & yhat must be 1D arrays")
-			y    = y.flatten()
+				raise ValueError( "y & yhat must be 1D arrays" )
+			y = y.flatten()
 			yhat = yhat.flatten()
 
 		kwargs['y'], kwargs['yhat'] = y, yhat
-		return func(*args, **kwargs)
+		return func( *args, **kwargs )
+
 	return wrapper
 
 
 @validating_label_vectors_decorator
-def remove_null_samples(y: Array_Series, yhat: Array_Series, RAISE_ValueError_IF_EMPTY: bool=False) -> Tuple[Array_Series, Array_Series]:
+def remove_null_samples(y: Array_Series, yhat: Array_Series, RAISE_ValueError_IF_EMPTY: bool = False) -> Tuple[
+	Array_Series, Array_Series]:
 	""" Filter out null samples and check if calculation should proceed. """
 
-	non_null = ~np.isnan( y ) if isinstance(y, np.ndarray) else y.notnull()
+	non_null = ~np.isnan( y ) if isinstance( y, np.ndarray ) else y.notnull()
 
 	if RAISE_ValueError_IF_EMPTY and (not non_null.any()):
-		raise ValueError("y and yhat must contain at least one non-null value")
+		raise ValueError( "y and yhat must contain at least one non-null value" )
 
 	return y[non_null], yhat[non_null]
 
 
 @dataclass
 class ROC:
-	y          : np.ndarray
-	yhat       : np.ndarray
-	REMOVE_NULL: bool       = True
-	THRESHOLD  : float      = field(default = None)
-	FPR        : np.ndarray = field(default = None)
-	TPR        : np.ndarray = field(default = None)
+	y: np.ndarray
+	yhat: np.ndarray
+	REMOVE_NULL: bool = True
+	THRESHOLD: float = field( default=None )
+	FPR: np.ndarray = field( default=None )
+	TPR: np.ndarray = field( default=None )
 
 	def __post_init__(self):
 		if self.REMOVE_NULL:
@@ -92,15 +97,16 @@ class ROC:
 			self.FPR, self.TPR, self.THRESHOLD = fpr, tpr, thr[np.argmax( tpr - fpr )]
 		return self
 
+
 @dataclass
 class PrecisionRecall:
-	y          : np.ndarray
-	yhat       : np.ndarray
-	REMOVE_NULL: bool       = True
-	THRESHOLD  : float      = field(default = None)
-	PPV        : np.ndarray = field(default = None)
-	RECALL     : np.ndarray = field(default = None)
-	F_SCORE    : np.ndarray = field(default = None)
+	y: np.ndarray
+	yhat: np.ndarray
+	REMOVE_NULL: bool = True
+	THRESHOLD: float = field( default=None )
+	PPV: np.ndarray = field( default=None )
+	RECALL: np.ndarray = field( default=None )
+	F_SCORE: np.ndarray = field( default=None )
 
 	def __post_init__(self):
 		if self.REMOVE_NULL:
@@ -116,9 +122,9 @@ class PrecisionRecall:
 
 @dataclass
 class CalculateMetrics:
-	y               : np.ndarray
-	yhat            : np.ndarray
-	REMOVE_NULL     : bool           = True
+	y: np.ndarray
+	yhat: np.ndarray
+	REMOVE_NULL: bool = True
 	thresh_technique: ThreshTechList = ThreshTechList.ROC
 
 	def __post_init__(self):
@@ -132,12 +138,12 @@ class CalculateMetrics:
 			return 0.5
 
 		if self.thresh_technique == ThreshTechList.ROC:
-			return ROC(y=self.y, yhat=self.yhat, REMOVE_NULL=False).calculate().THRESHOLD
+			return ROC( y=self.y, yhat=self.yhat, REMOVE_NULL=False ).calculate().THRESHOLD
 
 		if self.thresh_technique == ThreshTechList.PRECISION_RECALL:
-			return PrecisionRecall(y=self.y, yhat=self.yhat, REMOVE_NULL=False).calculate().THRESHOLD
+			return PrecisionRecall( y=self.y, yhat=self.yhat, REMOVE_NULL=False ).calculate().THRESHOLD
 
-		raise NotImplementedError(f"ThreshTechList {self.thresh_technique} not implemented")
+		raise NotImplementedError( f"ThreshTechList {self.thresh_technique} not implemented" )
 
 	@cached_property
 	def AUC(self) -> float:
@@ -152,19 +158,146 @@ class CalculateMetrics:
 		return sklearn.metrics.f1_score( self.y, self.yhat > self.THRESHOLD )
 
 
+@dataclass
+class ModelOutputs:
+	""" Class for storing model-related findings. """
+	truth_values: pd.DataFrame = field( default_factory = pd.DataFrame )
+	loss_values : pd.DataFrame = field( default_factory = pd.DataFrame )
+	logit_values: pd.DataFrame = field( default_factory = pd.DataFrame )
+	pred_values : pd.DataFrame = field( default_factory = pd.DataFrame )
+
+	def save(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
+
+		output_path = config.output.path / f'{experiment_stage}/model_outputs.xlsx'
+		output_path.parent.mkdir(parents=True, exist_ok=True)
+
+		with pd.ExcelWriter( output_path ) as writer:
+			self.truth_values.to_excel( writer, sheet_name = 'truth_values' )
+			self.loss_values.to_excel( writer , sheet_name = 'loss_values' )
+			self.logit_values.to_excel( writer, sheet_name = 'logit_values' )
+			self.pred_values.to_excel( writer , sheet_name = 'pred_values' )
+		return self
+
+	def load(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
+
+		input_path = config.output.path / f'{experiment_stage}/model_outputs.xlsx'
+
+		if input_path.is_file():
+			self.truth_values = pd.read_excel( input_path, sheet_name  = 'truth_values')
+			self.loss_values  = pd.read_excel( input_path, sheet_name  = 'loss_values' )
+			self.logit_values = pd.read_excel( input_path, sheet_name  = 'logit_values')
+			self.pred_values  = pd.read_excel( input_path, sheet_name  = 'pred_values' )
+		return self
+
+
 Array_Series_DataFrame: TypeAlias = Union[np.ndarray, pd.Series, pd.DataFrame]
 
 
 @dataclass
 class Metrics:
-	ACC      : Union[pd.Series, float] = field(default = None)
-	AUC      : Union[pd.Series, float] = field(default = None)
-	F1       : Union[pd.Series, float] = field(default = None)
-	THRESHOLD: Union[pd.Series, float] = field(default = None)
+	ACC      : Union[pd.Series, float] = field( default = None )
+	AUC      : Union[pd.Series, float] = field( default = None )
+	F1       : Union[pd.Series, float] = field( default = None )
+	THRESHOLD: Union[pd.Series, float] = field( default = None )
 
-	def _calculate_1D_data(self, y: np.ndarray, yhat: np.ndarray, REMOVE_NULL: bool=True, thresh_technique: ThreshTechList=ThreshTechList.ROC) -> 'Metrics':
+	def save(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'Metrics':
 
-		calculateMetrics = CalculateMetrics(y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL, thresh_technique=thresh_technique)
+		def get_formatted(metric):
+			return metric if isinstance(metric, pd.Series) else pd.Series([metric])
+
+		output_path = config.output.path / f'{experiment_stage}/metrics.xlsx'
+		output_path.parent.mkdir(parents=True, exist_ok=True)
+
+		with pd.ExcelWriter( output_path ) as writer:
+			get_formatted(self.ACC).to_excel( writer, sheet_name = 'acc' )
+			get_formatted(self.AUC).to_excel( writer, sheet_name = 'auc' )
+			get_formatted(self.F1).to_excel(  writer, sheet_name = 'f1' )
+			get_formatted(self.THRESHOLD).to_excel( writer, sheet_name = 'threshold' )
+		return self
+
+
+	def load(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'Metrics':
+
+		def set_formatted(metric):
+			if isinstance(metric, pd.Series) and len(metric) == 1:
+				return metric.iloc[0]
+			return metric
+
+		input_path = config.output.path / f'{experiment_stage}/metrics.xlsx'
+
+		if input_path.is_file():
+			self.ACC = set_formatted(pd.read_excel(input_path, sheet_name = 'acc', index_col = 0, squeeze = True))
+			self.AUC = set_formatted(pd.read_excel(input_path, sheet_name = 'auc', index_col = 0, squeeze = True))
+			self.F1  = set_formatted(pd.read_excel(input_path, sheet_name = 'f1' , index_col = 0, squeeze = True))
+			self.THRESHOLD = set_formatted(pd.read_excel(input_path, sheet_name = 'threshold', index_col = 0, squeeze = True))
+		return self
+
+
+	@classmethod
+	def calculate(cls, config: Settings, REMOVE_NULL: bool=True, **kwargs) -> 'Metrics':
+		# sourcery skip: raise-specific-error
+		try:
+			y    = kwargs['model_outputs'].truth_values if 'model_outputs' in kwargs else kwargs['y']
+			yhat = kwargs['model_outputs'].pred_values  if 'model_outputs' in kwargs else kwargs['yhat']
+
+		except KeyError as e:
+			" The KeyError would occur if the else clauses are reached and kwargs does not contain the keys 'y' or 'yhat'."
+			raise KeyError(f"Key {e} not found in kwargs") from e
+
+		except AttributeError as e:
+			"The AttributeErrorwould occur if the model_outputs object does not have the attributes truth_values or pred_values."
+			raise AttributeError(f"Attribute {e} not found in kwargs") from e
+
+		except TypeError as e:
+			" A TypeError would occur if you attempt an operation on a variable that is of an inappropriate type. In this case, if model_outputs is a basic data type like an integer, string, etc., that does not support attribute access."
+			raise TypeError(f"TypeError: {e}") from e
+
+		except Exception as e:
+			raise Exception(f"Exception: {e}") from e
+
+
+		return cls._calculate( y=y, yhat=yhat, config=config, REMOVE_NULL=REMOVE_NULL )
+
+
+	@classmethod
+	def _calculate(cls, y: Array_Series_DataFrame, yhat: Array_Series_DataFrame, config: Settings,
+		  REMOVE_NULL: bool = True) -> 'Metrics':
+
+		thresh_technique = config.hyperparameter_tuning.thresh_technique
+
+		if isinstance( y, pd.Series ):
+			y, yhat = y.to_numpy(), yhat.to_numpy()
+
+		if isinstance( y, np.ndarray ):
+			return cls()._calculate_1D_data( y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL,
+											 thresh_technique=thresh_technique )
+
+		elif isinstance( y, pd.DataFrame ):
+			metrics = cls()
+			metrics.THRESHOLD = pd.Series( index=y.columns )
+			metrics.AUC = pd.Series( index=y.columns )
+			metrics.ACC = pd.Series( index=y.columns )
+			metrics.F1 = pd.Series( index=y.columns )
+
+			for clm in y.columns:
+				mts = cls()._calculate_1D_data( y=y[clm], yhat=yhat[clm], REMOVE_NULL=REMOVE_NULL,
+												thresh_technique=thresh_technique )
+
+				metrics.THRESHOLD[clm] = mts.THRESHOLD
+				metrics.AUC[clm] = mts.AUC
+				metrics.ACC[clm] = mts.ACC
+				metrics.F1[clm] = mts.F1
+
+			return metrics
+
+		raise NotImplementedError( f"Metrics not implemented for type {type( y )}" )
+
+
+	def _calculate_1D_data(self, y: np.ndarray, yhat: np.ndarray, REMOVE_NULL: bool = True,
+						   thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
+
+		calculateMetrics = CalculateMetrics( y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL,
+											 thresh_technique=thresh_technique )
 
 		self.THRESHOLD = calculateMetrics.THRESHOLD
 		self.AUC       = calculateMetrics.AUC
@@ -172,77 +305,36 @@ class Metrics:
 		self.F1        = calculateMetrics.F1
 		return self
 
-	@classmethod
-	def calculate(cls, y: Array_Series_DataFrame, yhat: Array_Series_DataFrame, REMOVE_NULL: bool=True, thresh_technique: ThreshTechList=ThreshTechList.ROC) -> 'Metrics':
-
-		if isinstance(y, pd.Series):
-			y, yhat = y.to_numpy(), yhat.to_numpy()
-
-		if isinstance(y, np.ndarray):
-			return cls()._calculate_1D_data(y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL, thresh_technique=thresh_technique)
-
-		elif isinstance(y, pd.DataFrame):
-			metrics = cls()
-			metrics.THRESHOLD = pd.Series(index=y.columns)
-			metrics.AUC       = pd.Series(index=y.columns)
-			metrics.ACC       = pd.Series(index=y.columns)
-			metrics.F1        = pd.Series(index=y.columns)
-
-			for clm in y.columns:
-				mts = cls()._calculate_1D_data(y=y[clm], yhat=yhat[clm], REMOVE_NULL=REMOVE_NULL, thresh_technique=thresh_technique)
-
-				metrics.THRESHOLD[clm] = mts.THRESHOLD
-				metrics.AUC[clm]       = mts.AUC
-				metrics.ACC[clm]       = mts.ACC
-				metrics.F1[clm]        = mts.F1
-
-			return metrics
-
-		raise NotImplementedError(f"Metrics not implemented for type {type(y)}")
-
-
-@dataclass
-class ModelOutputs:
-	""" Class for storing model-related findings. """
-	truth_values: pd.DataFrame = field(default_factory = pd.DataFrame)
-	loss_values : pd.DataFrame = field(default_factory = pd.DataFrame)
-	logit_values: pd.DataFrame = field(default_factory = pd.DataFrame)
-	pred_values : pd.DataFrame = field(default_factory = pd.DataFrame)
-
-
 @dataclass
 class Findings:
 	""" Class for storing overall findings including configuration, data, and metrics. """
-	config: Settings
-	data: Data
-	model: torch.nn.Module
-	modelOutputs: ModelOutputs = None
-	metrics: Metrics = None
-	experimentStage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
-
-	def __post_init__(self):
-		self.modelOutputs = ModelOutputs()
-		self.metrics      = Metrics( classes=self.data.labels.classes )
+	config          : Settings
+	data            : Data                 = field( default = None )
+	model           : ModelType            = field( default = None )
+	experiment_stage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
+	model_outputs   : ModelOutputs         = field( default = None, init = False)
+	metrics         : Metrics              = field( default = None, init = False)
 
 
 @dataclass
 class FindingsTrainTest:
-	train: Findings = field(default = None)
-	test : Findings = field(default = None)
+	train: Findings = field( default=None )
+	test: Findings = field( default=None )
 
 
 @dataclass
 class FindingsAllTechniques:
-	loss    : FindingsTrainTest = field(default=None)
-	logit   : FindingsTrainTest = field(default=None)
-	baseline: FindingsTrainTest = field(default=None)
+	loss: FindingsTrainTest = field( default=None )
+	logit: FindingsTrainTest = field( default=None )
+	baseline: FindingsTrainTest = field( default=None )
 
 	def _get_obj(self):
 		for objName in ['loss', 'logit', 'baseline']:
-			obj = getattr(self, objName)
+			obj = getattr( self, objName )
 			if obj is not None:
 				return obj
-		raise ValueError( 'No suitable object has been initialized. Please initialize either "baseline", "loss", or "logit".')
+		raise ValueError(
+			'No suitable object has been initialized. Please initialize either "baseline", "loss", or "logit".' )
 
 	@property
 	def nodes(self):
@@ -254,23 +346,25 @@ class FindingsAllTechniques:
 
 	def plot_roc_curves(self, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
 
-		impacted_nodes    = self.nodes.IMPACTED
-		list_parent_nodes = list(self.nodes.taxonomy.keys())
-		truth             = self.baseline.test.modelOutputs.truth_values
+		impacted_nodes = self.nodes.IMPACTED
+		list_parent_nodes = list( self.nodes.taxonomy.keys() )
+		truth = self.baseline.test.model_outputs.truth_values
 
 		# Set up the grid
 		def setup_plot():
+			nonlocal fig, axes, n_rows, n_cols
 
 			# Set a seaborn style for visually appealing plots
-			sns.set(font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper', color_codes=True, rc=None)
+			sns.set( font_scale=font_scale, font='sans-serif', palette='colorblind', style='darkgrid', context='paper',
+					 color_codes=True, rc=None )
 
 			# Set up the grid
-			n_nodes, n_cols = len(impacted_nodes), 3
-			n_rows = int(np.ceil(n_nodes / n_cols))
+			n_nodes, n_cols = len( impacted_nodes ), 3
+			n_rows = int( np.ceil( n_nodes / n_cols ) )
 
 			# Set up the figure and axis
-			fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, sharey=True, sharex=True)  # type: ignore
-			axes     = axes.flatten()
+			fig, axes = plt.subplots( n_rows, n_cols, figsize=figsize, sharey=True, sharex=True )  # type: ignore
+			axes = axes.flatten()
 
 			return fig, axes, n_rows, n_cols
 
@@ -280,72 +374,77 @@ class FindingsAllTechniques:
 
 			row_idx = idx // n_cols
 			col_idx = idx % n_cols
-			ax      = axes[idx]
+			ax = axes[idx]
 
 			# Calculate the ROC curve and AUC
 			def get_fpr_tpr_auc(pred_node, truth_node, technique: TechniqueNames, roc_auc):
+				nonlocal technique
 
 				def get():
+					nonlocal fpr, tpr
 					# mask = ~truth_node.isnull()
-					mask = ~np.isnan(truth_node)
+					mask = ~np.isnan( truth_node )
 					truth_notnull = truth_node[mask].to_numpy()
 
-					if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
-						fpr, tpr, _ = sklearn.metrics.roc_curve(truth_notnull, pred_node[mask])
+					if (len( truth_notnull ) > 0) and (np.unique( truth_notnull ).size == 2):
+						fpr, tpr, _ = sklearn.metrics.roc_curve( truth_notnull, pred_node[mask] )
 						return fpr, tpr
 					return None, None
 
-				fpr, tpr =  get()
-				return sns.lineplot(x=fpr, y=tpr, label=f'{technique} AUC = {roc_auc:.2f}', linewidth=2, ax=ax)
+				fpr, tpr = get()
+				return sns.lineplot( x=fpr, y=tpr, label=f'{technique} AUC = {roc_auc:.2f}', linewidth=2, ax=ax )
 
 			# Plot the ROC curve
 			lines, labels = [], []
 
 			for methodName in TechniqueNames.members():
-
-				data = getattr(self, methodName.lower())
+				data = getattr( self, methodName.lower() )
 				technique = TechniqueNames[methodName]
 
-				line = get_fpr_tpr_auc(pred_node=data.pred[node], truth_node=truth[node], technique=technique, roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name])
-				lines.append(line.lines[-1])
-				labels.append(line.get_legend_handles_labels()[1][-1])
+				line = get_fpr_tpr_auc( pred_node=data.pred[node], truth_node=truth[node], technique=technique,
+										roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name] )
+				lines.append( line.lines[-1] )
+				labels.append( line.get_legend_handles_labels()[1][-1] )
 
 			# Customize the plot
-			ax.plot([0, 1], [0, 1], linestyle='--', linewidth=2)
-			ax.set_xlabel('False Positive Rate', fontsize=fontsize, labelpad=labelpad) if row_idx == n_rows - 1 else ax.set_xticklabels([])
-			ax.set_ylabel('True Positive Rate', fontsize=fontsize, labelpad=labelpad) if col_idx == 0 else ax.set_yticklabels([])
-			ax.legend(loc='lower right', fontsize=12)
-			ax.set_xlim([0.0, 1.0 ])
-			ax.set_ylim([0.0, 1.05])
+			ax.plot( [0, 1], [0, 1], linestyle='--', linewidth=2 )
+			ax.set_xlabel( 'False Positive Rate', fontsize=fontsize,
+						   labelpad=labelpad ) if row_idx == n_rows - 1 else ax.set_xticklabels( [] )
+			ax.set_ylabel( 'True Positive Rate', fontsize=fontsize,
+						   labelpad=labelpad ) if col_idx == 0 else ax.set_yticklabels( [] )
+			ax.legend( loc='lower right', fontsize=12 )
+			ax.set_xlim( [0.0, 1.0] )
+			ax.set_ylim( [0.0, 1.05] )
 
-			leg = ax.legend(lines, labels, loc='lower right', fontsize=fontsize, title=node)
-			plt.setp(leg.get_title(),fontsize=fontsize)
+			leg = ax.legend( lines, labels, loc='lower right', fontsize=fontsize, title=node )
+			plt.setp( leg.get_title(), fontsize=fontsize )
 
 			# Set the background color of the plot to gray if the node is a parent node
 			if node in list_parent_nodes:
-				ax.set_facecolor('xkcd:light grey')
+				ax.set_facecolor( 'xkcd:light grey' )
 
-			fig.suptitle('ROC Curves', fontsize=int(1.5*fontsize), fontweight='bold')
+			fig.suptitle( 'ROC Curves', fontsize=int( 1.5 * fontsize ), fontweight='bold' )
 			plt.tight_layout()
 
 		def postprocess():
 			# Remove any empty plots in the grid
-			for empty_idx in range(idx + 1, n_rows * n_cols):
-				axes[empty_idx].axis('off')
+			for empty_idx in range( idx + 1, n_rows * n_cols ):
+				axes[empty_idx].axis( 'off' )
 
 			plt.tight_layout()
 
 		# Loop through each disease and plot the ROC curve
-		for idx, node in enumerate(self.nodes.IMPACTED):
-			plot_per_node(node, idx)
+		for idx, node in enumerate( self.nodes.IMPACTED ):
+			plot_per_node( node, idx )
 
 		# Postprocess the plot
 		postprocess()
 
 		# Save the plot
 		if save_figure:
-			file_path = findings.config.output.path / f'figures/roc_curve_all_datasets/{findings.config.hyperparameter_tuning.thresh_technique}/roc_curve_all_datasets.png'
-			LoadSaveFile(file_path).save(data=fig)
+			file_path = self.config.output.path / f'figures/roc_curve_all_datasets/{self.config.hyperparameter_tuning.thresh_technique}/roc_curve_all_datasets.png'
+			LoadSaveFile( file_path ).save( data=fig )
+
 
 '''
 class Tables:

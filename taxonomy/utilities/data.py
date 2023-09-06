@@ -6,7 +6,7 @@ import pathlib
 import pickle
 from dataclasses import dataclass, field, InitVar
 from functools import cached_property, singledispatchmethod, wraps
-from typing import Any, Optional, overload, Tuple, Union
+from typing import Any, Optional, Tuple, Union
 
 import networkx as nx
 import pandas as pd
@@ -20,6 +20,7 @@ from taxonomy.utilities.params import DatasetNames, HyperparameterNames, ThreshT
 from taxonomy.utilities.settings import DatasetInfo, Settings
 
 USE_CUDA = torch.cuda.is_available()
+
 
 @dataclass
 class Nodes:
@@ -432,12 +433,17 @@ def check_file_exist(func):
 		return func(self, file_path, *args, **kwargs)
 	return wrapper
 
+
 class LoadSaveFile:
 
 	def __init__(self, file_path: Union[str, pathlib.Path]):
+
 		self.file_path = pathlib.Path(file_path)
-		self.file_path.is_dir()  and self.file_path.mkdir(parents=True, exist_ok=True)
-		self.file_path.is_file() and self.file_path.parent.mkdir(parents=True, exist_ok=True)
+
+		if self.file_path.suffix:
+			self.file_path.parent.mkdir(parents=True, exist_ok=True)
+		else:
+			self.file_path.mkdir(parents=True, exist_ok=True)
 
 	def load(self, **kwargs) -> Union[dict, pd.DataFrame, plt.Figure]:
 
