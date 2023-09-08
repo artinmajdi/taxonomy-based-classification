@@ -16,16 +16,14 @@ import torchxrayvision as xrv
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader as torch_DataLoader
 
-from taxonomy.utilities.params import DatasetNames, HyperparameterNames, ThreshTechList
+from taxonomy.utilities.findings import Findings
+from taxonomy.utilities.params import DatasetNames, HyperparameterNames, ParentMetricToUseNames, TechniqueNames, \
+	ThreshTechList
 from taxonomy.utilities.settings import DatasetInfo, Settings
 
 USE_CUDA = torch.cuda.is_available()
 
 
-@dataclass
-class Hyperparameter:
-	MULTIPLIER: float = 1.0
-	ADDITIVE  : float = 0.0
 
 
 @dataclass
@@ -112,7 +110,6 @@ class Nodes:
 	def add_hyperparameters_to_node(self, node: str, hyperparameter: Hyperparameter):
 		parent_node = self.get_parent_of( node )
 		self.graph.edges[parent_node, node] = hyperparameter
-
 
 	def get_hyperparameters_of_node(self, parent_node: str, child_node: str) -> dict[HyperparameterNames, float]:
 		return self.graph.edges[parent_node, child_node]

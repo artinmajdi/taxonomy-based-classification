@@ -106,21 +106,25 @@ class ModelSettings(BaseModel):
 		return self.modelName.full_name
 
 class SimulationSettings(BaseModel):
-	findings_original: SimulationOptions = SimulationOptions.RUN_SIMULATION
-	findings_new     : SimulationOptions = SimulationOptions.RUN_SIMULATION
-	hyperparameters  : SimulationOptions = SimulationOptions.RUN_SIMULATION
-	metrics          : SimulationOptions = SimulationOptions.RUN_SIMULATION
+	findings_original  : SimulationOptions = SimulationOptions.RUN_SIMULATION
+	findings_new       : SimulationOptions = SimulationOptions.RUN_SIMULATION
+	hyperparameters    : SimulationOptions = SimulationOptions.RUN_SIMULATION
+	metrics            : SimulationOptions = SimulationOptions.RUN_SIMULATION
+	use_parallelization: bool = True
+	num_workers        : conint(gt         = 0) = 1
+
+class TechniqueSettings(BaseModel):
+	technique_name                       : TechniqueNames = TechniqueNames.LOGIT
+	metric_used_to_select_best_parameters: EvaluationMetricNames = EvaluationMetricNames.AUC
+	parent_metric_to_use                 : ParentMetricToUseNames = ParentMetricToUseNames.TRUTH
+	thresh_technique                     : ThreshTechList = ThreshTechList.ROC
 
 class HyperParameterTuningSettings(BaseModel):
-	metric_used_to_select_best_parameters: EvaluationMetricNames = EvaluationMetricNames.AUC
-	techniqueName         : TechniqueNames         = TechniqueNames.LOGIT
-	parent_metric_to_use  : ParentMetricToUseNames = ParentMetricToUseNames.TRUTH
-	max_evals             : conint(gt = 0) = 20
-	num_workers           : conint(gt = 0) = 1
-	hyper_param_multiplier: confloat(ge = 0) = 0.0
-	hyper_param_additive  : confloat(ge = 0) = 1.0
-	use_parallelization   : bool = True
-	thresh_technique	  : ThreshTechList = ThreshTechList.ROC
+	max_evals              : conint(gt = 0) = 20
+	initial_multiplier     : confloat(ge = 0) = 0.0
+	initial_additive       : confloat(ge = 0) = 1.0
+	search_space_multiplier: list[float] = [-1, 1]
+	search_space_additive  : list[float] = [-4, 4]
 
 class OutputSettings(BaseModel):
 	path: pathlib.Path = pathlib.Path('../outputs')
@@ -162,7 +166,7 @@ def get_settings(argv=None, jupyter=True, config_path='config.json') -> Settings
 				dict(name = 'max_samples' , type = int, help = 'Maximum number of samples to load' ),
 
 				# Model
-				dict(name='techniqueName'   , type=str , help='Name of the pre_trained model.' ),
+				dict(name='technique_name'   , type=str , help='Name of the pre_trained model.' ),
 
 				# Training
 				dict(name = 'batch_size'        , type = int  , help = 'Number of batches to process' ),

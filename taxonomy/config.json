@@ -27,18 +27,22 @@
     "findings_original": "load_from_local",
     "findings_new"     : "load_from_local",
     "hyperparameters"  : "load_from_local",
-    "metrics"          : "load_from_local"
-  },
-  "hyperparameter_tuning": {
-    "metric_used_to_select_best_parameters": "auc",
-    "techniqueName"                        : "loss_based",
-    "parent_metric_to_use"                 : "ground_truth",
-    "max_evals"                            : 20,
-    "thresh_technique"                     : "ROC",
-    "hyper_param_multiplier"               : 0.0,
-    "hyper_param_additive"                 : 1.0,
+    "metrics"          : "load_from_local",
     "use_parallelization"                  : true,
     "num_workers"                          : 1
+  },
+  "technique": {
+    "technique_name"                       : "loss_based",
+    "metric_used_to_select_best_parameters": "auc",
+    "parent_metric_to_use"                 : "ground_truth",
+    "thresh_technique"                     : "ROC"
+  },
+  "hyperparameter_tuning": {
+    "max_evals"                            : 20,
+    "initial_multiplier"                   : 0.0,
+    "initial_additive"                     : 1.0,
+    "search_space_multiplier"              : [-1, 1],
+    "search_space_additive"                : [-4, 4],
   },
   "output": {
     "path": "./outputs"

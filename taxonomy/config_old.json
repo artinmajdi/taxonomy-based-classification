@@ -41,5 +41,5 @@
   "parallelization_technique" : 0 ,
 
   "PATH_LOCAL"             : "./main/aims/aim1_1_taxonomy/outputs",
-  "techniqueName"             : "LOSS"
+  "technique_name"             : "LOSS"
 }

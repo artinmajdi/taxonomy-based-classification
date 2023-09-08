@@ -5,7 +5,7 @@ import multiprocessing
 import pathlib
 from collections import defaultdict
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, InitVar
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -18,7 +18,9 @@ from hyperopt import fmin, hp, tpe
 from scipy import stats
 from tqdm import tqdm
 
-from taxonomy.utilities.data import Data, LoadChestXrayDatasets, LoadSaveFile, Nodes
+from taxonomy.utilities.data import Data, HyperparameterNode, HyperParameters, HyperParametersAndPenalties, \
+	LoadChestXrayDatasets, LoadSaveFile, \
+	Nodes
 from taxonomy.utilities.findings import Findings, Metrics, ModelOutputs
 from taxonomy.utilities.model import LoadModelXRV, ModelType
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
@@ -139,69 +141,26 @@ class CalculateOriginalFindings:
 
 		return self
 
-'''
+
 @dataclass
 class CalculateNewFindings:
-	config          : Settings
-	data            : Data
-	model           : ModelType
-	hyperparameters : Dict[ThreshTechList, pd.DataFrame]
+	findings_original: InitVar[Findings]
+	hyper_parameters_and_penalties : HyperParametersAndPenalties
 
-	def __post_init__(self):
-		self.findings = Findings( config = self.config,
-								  data   = self.data,
-								  model  = self.model,
-								  experiment_stage = ExperimentStageNames.NEW )
+	def __post_init__(self, findings_original: Findings):
 
-	@staticmethod
-	def get_hierarchy_penalty_for_node(graph, node, thresh_technique, parent_metric_to_use, techniqueName, a, b=0) -> np.ndarray:
+		if self.hyper_parameters_and_penalties.PENALTY is None:
+			self.hyper_parameters_and_penalties.calculate_penalty(findings=findings_original)
 
-		def calculate_H(parent_node: str) -> np.ndarray:
+		self.findings = Findings( config = findings_original.config,
+								  data   = findings_original.data,
+								  model  = findings_original.model,
+								  experiment_stage = ExperimentStageNames.NEW)
 
-			def calculate_raw_weight(pdata) -> pd.Series:
-				if   techniqueName is TechniqueNames.LOGIT: return pd.Series(a * pdata.data.logit.to_numpy(), index=pdata.data.index)
-				elif techniqueName is TechniqueNames.LOSS:  return pd.Series(a * pdata.data.loss.to_numpy() + b, index=pdata.data.index)
-				else: raise ValueError(' techniqueName is not supproted')
+		self.findings.model_outputs    = ModelOutputs()
+		self.findings.metrics          = Metrics()
+		self.findings.hyper_parameters = self.hyper_parameters_and_penalties
 
-			def apply_parent_doesnot_exist_condition(hierarchy_penalty: pd.Series, pdata) -> np.ndarray:
-
-				def parent_exist():
-					if   parent_metric_to_use == ParentMetricToUseNames.PRED : return pdata.data.pred >= pdata.metrics.Threshold
-					elif parent_metric_to_use == ParentMetricToUseNames.TRUTH: return pdata.data.truth >= 0.5
-					elif parent_metric_to_use == ParentMetricToUseNames.NONE : return pdata.data.truth < 0
-
-				# Setting the hierarchy_penalty to one for samples where the parent class exist,
-				# because we can not infer any information from those samples.
-				hierarchy_penalty[parent_exist()] = 1.0
-
-				# Setting the hierarchy_penalty to 1.0 for samples where we don't have the truth label for parent class.
-				hierarchy_penalty[np.isnan( pdata.data.truth )] = 1.0
-
-				return hierarchy_penalty.to_numpy()
-
-			# Getting the parent data
-			pdata = Hierarchy.get_findings_for_node(graph=graph, node=parent_node, experimentStage=ExperimentStageNames.ORIGINAL, thresh_technique=thresh_technique)
-
-			# Calculating the initial hierarchy_penalty based on "a", "b" and "techniqueName"
-			hierarchy_penalty = calculate_raw_weight(pdata)
-
-			# Cleaning up the hierarchy_penalty for the current node: Setting the hierarchy_penalty to one for samples where the parent class exist, and Nan if the parent label is Nan
-			return apply_parent_doesnot_exist_condition( hierarchy_penalty=hierarchy_penalty, pdata=pdata )
-
-		def set_H_to_be_ineffective() -> np.ndarray:
-
-			ndata = Hierarchy.get_findings_for_node(graph=graph, node=node, thresh_technique=thresh_technique, experimentStage=ExperimentStageNames.ORIGINAL)
-
-			if   techniqueName is TechniqueNames.LOGIT: return np.zeros(len(ndata.data.index))
-			elif techniqueName is TechniqueNames.LOSS:  return np.ones(len(ndata.data.index))
-
-			raise ValueError(' techniqueName is not supproted')
-
-		# Get the parent node of the current node. We assume that each node can only have one parent to avoid complications in theoretical calculations.
-		parent_node = Hierarchy.get_parent_node(graph=graph, node=node)
-
-		# Calculating the hierarchy_penalty for the current node
-		return calculate_H(parent_node) if parent_node else set_H_to_be_ineffective()
 
 	@staticmethod
 	def do_approach(config, w, ndata):  # type: (Settings, pd.Series, Hierarchy.OUTPUT) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
@@ -238,46 +197,23 @@ class CalculateNewFindings:
 
 			return pred_new.to_numpy(), logit_new.to_numpy()
 
-		if  config.techniqueName is TechniqueNames.LOGIT:
+		if  config.technique_name is TechniqueNames.LOGIT:
 			pred_new, logit_new = do_approach1_per_node()
 			loss_new = np.ones(pred_new.shape) * np.nan
 
-		elif config.techniqueName is TechniqueNames.LOSS:
+		elif config.technique_name is TechniqueNames.LOSS:
 			pred_new, loss_new  = do_approach2_per_node()
 			logit_new = np.ones(pred_new.shape) * np.nan
 		else:
-			raise ValueError(' techniqueName is not supported')
+			raise ValueError(' technique_name is not supported')
 
 		return pred_new, logit_new, loss_new
 
 	@staticmethod
-	def calculate_per_node(node: str, data: Data, config: Settings, hyperparameters: Dict[ThreshTechList, pd.DataFrame], thresh_technique: ThreshTechList) -> Data:
-
-		x = thresh_technique
-		graph = data.Hierarchy_cls.graph
-
-		def initialization():
-			# Adding the truth values
-			# data.NEW.truth[node] = data.ORIGINAL.truth[node]
-
-			# fixing_dataframes_indices_columns
-			index   = data.ORIGINAL.truth.index
-			# columns = data.ORIGINAL.truth.columns
-
-			data.NEW.pred              [x,node] = pd.Series(index=index)
-			data.NEW.logit             [x,node] = pd.Series(index=index)
-			data.NEW.loss              [x,node] = pd.Series(index=index)
-			data.NEW.hierarchy_penalty [x,node] = pd.Series(index=index)
-		initialization()
+	def calculate_per_node(node: str, data: Data, config: Settings, hyperparameters: HyperParameters, thresh_technique: ThreshTechList) -> Data:
 
 		# Getting the hierarchy_penalty for the node
-		a, b = hyperparameters[x].loc['a', node], hyperparameters[x].loc['b',node]
-		data.NEW.hierarchy_penalty[x, node] = CalculateNewFindings.get_hierarchy_penalty_for_node( graph=graph, a=a, b=b, node=node, thresh_technique=x, parent_metric_to_use=config.parent_metric_to_use, techniqueName=config.techniqueName )
-
-		# Getting node data
-		ndata: NodeData = Hierarchy.get_findings_for_node(graph=graph, node=node, thresh_technique=x, experimentStage=ExperimentStageNames.ORIGINAL)
-
-		data.NEW.pred[x, node], data.NEW.logit[x, node], data.NEW.loss[x, node] = CalculateNewFindings.do_approach( config=config, w=data.NEW.hierarchy_penalty[x][node], ndata=ndata )
+		data.NEW.pred[node], data.NEW.logit[node], data.NEW.loss[node] = CalculateNewFindings.do_approach( config=config, w=data.NEW.hierarchy_penalty[node], ndata=ndata )
 
 		data.NEW = TaxonomyXRV.calculating_threshold_and_metrics_per_node(node=node, findings=data.NEW, thresh_technique=x)
 
@@ -306,10 +242,10 @@ class CalculateNewFindings:
 		LoadSaveFindings(self.config, self.save_path_full).save( self.data.NEW.results )
 
 	@classmethod
-	def get_updated_data(cls, model: torch.nn.Module, data: Data, hyperparameters: dict, config: Settings, techniqueName: TechniqueNames) -> Data:
+	def get_updated_data(cls, model: torch.nn.Module, data: Data, hyperparameters: dict, config: Settings, technique_name: TechniqueNames) -> Data:
 
 		# Initializing the class
-		NEW = cls(model=model, data=data, hyperparameters=hyperparameters, config=config, techniqueName=techniqueName)
+		NEW = cls(model=model, data=data, hyperparameters=hyperparameters, config=config, technique_name=technique_name)
 
 		if config.do_findings_new == 'calculate':
 			NEW.do_calculate()
@@ -330,15 +266,13 @@ class HyperParameterTuning:
 		self.config      = config
 		self.data 		 = data
 		self.model       = model
-		self.save_path_full = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{config.techniqueName}/hyperparameters.pkl'
+		self.save_path_full = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{config.technique_name}/hyperparameters.pkl'
 		self.hyperparameters = None
 
-		# Initializing the data.NEW
-		if data.NEW is None:
-			data.initialize_findings(pathologies=model.pathologies, experiment_stage=ExperimentStageNames.NEW)
 
 	def initial_hyperparameters(self, a=0.0 , b=1.0):  # type: (float, float) -> Dict[str, pd.DataFrame]
 		return {th: pd.DataFrame( {n:dict(a=a,b=b) for n in self.model.pathologies} ) for th in ThreshTechList}
+
 
 	@staticmethod
 	def calculate_per_node(data: Data, config: Settings, hyperparameters: Dict[str, pd.DataFrame], node: str, thresh_technique: ThreshTechList=ThreshTechList.DEFAULT) -> List[float]:
@@ -363,6 +297,7 @@ class HyperParameterTuning:
 					)
 
 		return [ best['a'] , best['b'] ]
+
 
 	@staticmethod
 	def calculate(initial_hp, config, data):  # type: (Dict[str, pd.DataFrame], Settings, Data) -> Dict[str, pd.DataFrame]
@@ -422,6 +357,7 @@ class HyperParameterTuning:
 
 		return update_hyperparameters(results_in=results)
 
+
 	def do_calculate(self):
 
 		if self.config.do_hyperparameters == 'DEFAULT':
@@ -434,6 +370,7 @@ class HyperParameterTuning:
 
 		# Saving the new findings
 		LoadSaveFindings(self.config, self.save_path_full).save(self.hyperparameters)
+
 
 	@classmethod
 	def get_updated_data(cls, config, data, model):
@@ -476,8 +413,8 @@ class TaxonomyXRV:
 		self.model          : Optional[torch.nn.Module]           = None
 		self.dataset         : Optional[xrv.datasets.CheX_Dataset] = None
 
-		techniqueName = config.techniqueName or EvaluationMetricNames.LOSS
-		self.save_path : str = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{techniqueName}'
+		technique_name = config.technique_name or EvaluationMetricNames.LOSS
+		self.save_path : str = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{technique_name}'
 
 		# Setting the seed
 		self.setting_random_seeds_for_pytorch(seed=seed)
@@ -632,7 +569,7 @@ class TaxonomyXRV:
 		return LD.train, LD.test, model, LD.dataset_full
 
 	@classmethod
-	def run_full_experiment(cls, techniqueName=TechniqueNames.LOSS, seed=10, **kwargs):
+	def run_full_experiment(cls, technique_name=TechniqueNames.LOSS, seed=10, **kwargs):
 
 		# Getting the user arguments
 		config = get_settings( jupyter=True, **kwargs )
@@ -658,8 +595,8 @@ class TaxonomyXRV:
 
 		# Measuring the updated metrics (predictions and losses, thresholds, aucs, etc.)
 		param_dict = {key: getattr(FE, key) for key in ['model', 'config', 'hyperparameters']}
-		FE.train = CalculateNewFindings.get_updated_data(data=FE.train, techniqueName=techniqueName, **param_dict)
-		FE.test  = CalculateNewFindings.get_updated_data(data=FE.test , techniqueName=techniqueName, **param_dict)
+		FE.train = CalculateNewFindings.get_updated_data(data=FE.train, technique_name=technique_name, **param_dict)
+		FE.test  = CalculateNewFindings.get_updated_data(data=FE.test , technique_name=technique_name, **param_dict)
 
 		# Saving the metrics: AUC, threshold, accuracy
 		FE.save_metrics()
@@ -669,11 +606,11 @@ class TaxonomyXRV:
 	@staticmethod
 	def loop_run_full_experiment():
 		for datasetName in DatasetNames.members():
-			for techniqueName in TechniqueNames:
-				TaxonomyXRV.run_full_experiment(techniqueName=techniqueName, datasetName=datasetName)
+			for technique_name in TechniqueNames:
+				TaxonomyXRV.run_full_experiment(technique_name=technique_name, datasetName=datasetName)
 
 	@classmethod
-	def get_merged_data(cls, data_mode=DataModes.TEST, techniqueName='logit', thresh_technique='DEFAULT', datasets_list=None):  # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
+	def get_merged_data(cls, data_mode=DataModes.TEST, technique_name='logit', thresh_technique='DEFAULT', datasets_list=None):  # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
 
 		if datasets_list is None:
 			datasets_list = DatasetNames
@@ -681,7 +618,7 @@ class TaxonomyXRV:
 		def get(method: ExperimentStageNames) -> DataMerged:
 			data = defaultdict(list)
 			for datasetName in datasets_list:
-				a1 = cls.run_full_experiment(techniqueName=techniqueName, datasetName=datasetName)
+				a1 = cls.run_full_experiment(technique_name=technique_name, datasetName=datasetName)
 
 				metric = getattr( getattr(a1,data_mode),method.value)
 				data['pred'].append(metric.pred[thresh_technique] if method == ExperimentStageNames.NEW else metric.pred)
@@ -702,9 +639,9 @@ class TaxonomyXRV:
 		config = get_settings(jupyter=jupyter, **kwargs)
 		save_path = pathlib.Path(f'tables/metrics_all_datasets/{thresh_technique}')
 
-		def apply_to_approach(techniqueName: TechniqueNames) -> Metrics:
+		def apply_to_approach(technique_name: TechniqueNames) -> Metrics:
 
-			baseline, proposed = cls.get_merged_data(data_mode=data_mode, techniqueName=techniqueName, thresh_technique=thresh_technique, datasets_list=datasets_list)
+			baseline, proposed = cls.get_merged_data(data_mode=data_mode, technique_name=technique_name, thresh_technique=thresh_technique, datasets_list=datasets_list)
 
 			def get_auc_acc_f1(node: str, data: DataMerged):
 
@@ -739,7 +676,7 @@ class TaxonomyXRV:
 				get_auc_acc_f1(node, proposed)
 				get_p_value_kappa_cohen_d_bf10(metrics_comparison, node)
 
-			return Metrics(metrics_comparison=metrics_comparison, baseline=baseline, proposed=proposed, config=config, techniqueName=techniqueName)
+			return Metrics(metrics_comparison=metrics_comparison, baseline=baseline, proposed=proposed, config=config, technique_name=technique_name)
 
 		def get_auc_acc_f1_merged(logit, loss):  # type: (Metrics, Metrics) -> pd.DataFrame
 			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), TechniqueNames.members()])
@@ -807,4 +744,3 @@ class CalculateHierarchyPenalty:
 
 		return hierarchy_penalty
 
-'''

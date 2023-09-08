@@ -11,7 +11,7 @@ from matplotlib import pyplot as plt
 from taxonomy.utilities.data import Data, LoadSaveFile
 from taxonomy.utilities.model import ModelType
 from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, \
-	TechniqueNames, ThreshTechList
+	ParentMetricToUseNames, TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import Settings
 
 Array_Series: TypeAlias = Union[np.ndarray, pd.Series]
@@ -190,8 +190,6 @@ class ModelOutputs:
 
 
 Array_Series_DataFrame: TypeAlias = Union[np.ndarray, pd.Series, pd.DataFrame]
-
-
 @dataclass
 class Metrics:
 	ACC      : Union[pd.Series, float] = field( default = None )
@@ -259,8 +257,7 @@ class Metrics:
 
 
 	@classmethod
-	def _calculate(cls, y: Array_Series_DataFrame, yhat: Array_Series_DataFrame, config: Settings,
-		  REMOVE_NULL: bool = True) -> 'Metrics':
+	def _calculate(cls, y: Array_Series_DataFrame, yhat: Array_Series_DataFrame, config: Settings, REMOVE_NULL: bool = True) -> 'Metrics':
 
 		thresh_technique = config.hyperparameter_tuning.thresh_technique
 
@@ -292,8 +289,7 @@ class Metrics:
 		raise NotImplementedError( f"Metrics not implemented for type {type( y )}" )
 
 
-	def _calculate_1D_data(self, y: np.ndarray, yhat: np.ndarray, REMOVE_NULL: bool = True,
-						   thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
+	def _calculate_1D_data(self, y: np.ndarray, yhat: np.ndarray, REMOVE_NULL: bool = True, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
 
 		calculateMetrics = CalculateMetrics( y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL,
 											 thresh_technique=thresh_technique )
@@ -304,15 +300,73 @@ class Metrics:
 		self.F1        = calculateMetrics.F1
 		return self
 
+
+@dataclass
+class HyperParametersAndPenalties:
+	MULTIPLIER: pd.Series = None
+	ADDITIVE  : pd.Series = None
+	PENALTY   : pd.DataFrame = None
+
+	def calculate_penalty_for_node(self, findings: 'Findings', node: str) -> pd.Series:
+		""" Method to calculate hierarchical penalty for a node. """
+
+		parent_metric_to_use: ParentMetricToUseNames = findings.config.technique.parent_metric_to_use
+		technique_name: TechniqueNames = findings.config.technique.technique_name
+		parent_node   : str            = findings.data.nodes.get_parent_of(child = node)
+		pred          : pd.DataFrame   = findings.model_outputs.pred_values
+		logit         : pd.DataFrame   = findings.model_outputs.logit_values
+		truth         : pd.DataFrame   = findings.model_outputs.truth_values
+		loss          : pd.DataFrame   = findings.model_outputs.loss_values
+		threshold     : pd.Series      = findings.metrics.THRESHOLD
+
+		if parent_node is None:
+			if   technique_name == TechniqueNames.LOGIT: return pd.Series(0.0, index=truth.index)
+			elif technique_name == TechniqueNames.LOSS:  return pd.Series(1.0, index=truth.index)
+			raise NotImplementedError(f"Technique {technique_name} not implemented")
+
+		def parent_exist():
+			if   parent_metric_to_use == ParentMetricToUseNames.PRED:
+				return pred[parent_node] >= threshold[parent_node]
+
+			elif parent_metric_to_use == ParentMetricToUseNames.TRUTH:
+				return truth[parent_node] >= 0.5
+
+			elif parent_metric_to_use == ParentMetricToUseNames.NONE:
+				return pd.Series(True, truth[parent_node].index)
+
+		# Calculating the initial hierarchy_penalty based on "a", "b" and "technique_name"
+		if technique_name == TechniqueNames.LOGIT:
+			hierarchy_penalty = self.MULTIPLIER[parent_node] * logit[parent_node]
+
+		elif technique_name == TechniqueNames.LOSS:
+			hierarchy_penalty = self.MULTIPLIER[parent_node] * loss[parent_node] + self.ADDITIVE[parent_node]
+
+		else:
+			raise NotImplementedError(f"Technique {technique_name} not implemented")
+
+		# Setting the hierarchy_penalty to one for samples where the parent class exist, because we can not infer any information from those samples.
+		hierarchy_penalty[parent_exist()] = 1.0
+
+		# Setting the hierarchy_penalty to 1.0 for samples where we don't have the truth label for parent class.
+		hierarchy_penalty[truth[parent_node].isnull()] = 1.0
+
+		return hierarchy_penalty
+
+	def calculate_penalty(self, findings: 'Findings'):
+		for node in findings.data.nodes.IMPACTED:
+			self.PENALTY[node] = self.calculate_penalty_for_node(findings, node)
+
+
 @dataclass
 class Findings:
 	""" Class for storing overall findings including configuration, data, and metrics. """
 	config          : Settings
-	data            : Data                 = field( default = None )
-	model           : ModelType            = field( default = None )
+	data            : Data            = field(default = None)
+	model           : ModelType       = field(default = None)
+	model_outputs   : ModelOutputs    = field(default = None, init=False)
+	metrics         : Metrics         = field(default = None, init=False)
+	hyper_parameters: HyperParametersAndPenalties = field(default = None, init=False)
 	experiment_stage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
-	model_outputs   : ModelOutputs         = field( default = None, init = False)
-	metrics         : Metrics              = field( default = None, init = False)
 
 
 @dataclass
@@ -395,9 +449,9 @@ class FindingsAllTechniques:
 			# Plot the ROC curve
 			lines, labels = [], []
 
-			for techniqueName in TechniqueNames.members():
-				data = getattr( self, techniqueName.lower() )
-				technique = TechniqueNames[techniqueName]
+			for technique_name in TechniqueNames.members():
+				data = getattr( self, technique_name.lower() )
+				technique = TechniqueNames[technique_name]
 
 				line = get_fpr_tpr_auc( pred_node=data.pred[node], truth_node=truth[node], technique=technique,
 										roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name] )
@@ -444,6 +498,11 @@ class FindingsAllTechniques:
 			LoadSaveFile( file_path ).save( data=fig )
 
 
+@dataclass
+class HyperparameterNode:
+	MULTIPLIER: float = 1.0
+	ADDITIVE  : float = 0.0
+
 '''
 class Tables:
 
@@ -469,7 +528,7 @@ class Tables:
 
 		def get():
 			columns = pd.MultiIndex.from_product([DatasetNames.members(), TechniqueNames.members()],
-			                                     names=['dataset_full', 'techniqueName'])
+			                                     names=['dataset_full', 'technique_name'])
 			AUC = pd.DataFrame(columns = columns)
 			F1  = pd.DataFrame(columns = columns)
 			ACC = pd.DataFrame(columns = columns)
@@ -479,7 +538,7 @@ class Tables:
 			BASELINE = TechniqueNames.BASELINE.name
 
 			for dt in DatasetNames.members():
-				df = TaxonomyXRV.run_full_experiment(techniqueName=TechniqueNames.LOGIT, datasetName=dt)
+				df = TaxonomyXRV.run_full_experiment(technique_name=TechniqueNames.LOGIT, datasetName=dt)
 				AUC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
@@ -488,7 +547,7 @@ class Tables:
 				F1[ (dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
 
-				df = TaxonomyXRV.run_full_experiment(techniqueName=TechniqueNames.LOSS, datasetName=dt)
+				df = TaxonomyXRV.run_full_experiment(technique_name=TechniqueNames.LOSS, datasetName=dt)
 				AUC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
 				ACC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
