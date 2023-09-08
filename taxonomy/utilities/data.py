@@ -25,7 +25,6 @@ USE_CUDA = torch.cuda.is_available()
 
 
 
-
 @dataclass
 class Nodes:
 	labels               : InitVar[pd.DataFrame]

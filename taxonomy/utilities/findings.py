@@ -1,6 +1,6 @@
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, InitVar
 from functools import cached_property, wraps
-from typing import Tuple, TypeAlias, Union
+from typing import Any, Optional, Tuple, TypeAlias, Union
 
 import numpy as np
 import pandas as pd
@@ -160,10 +160,27 @@ class CalculateMetrics:
 @dataclass
 class ModelOutputs:
 	""" Class for storing model-related findings. """
-	truth_values: pd.DataFrame = field( default_factory = pd.DataFrame )
-	loss_values : pd.DataFrame = field( default_factory = pd.DataFrame )
-	logit_values: pd.DataFrame = field( default_factory = pd.DataFrame )
-	pred_values : pd.DataFrame = field( default_factory = pd.DataFrame )
+	truth_values: Union[pd.DataFrame, pd.Series] = None
+	loss_values : Union[pd.DataFrame, pd.Series] = None
+	logit_values: Union[pd.DataFrame, pd.Series] = None
+	pred_values : Union[pd.DataFrame, pd.Series] = None
+
+	@classmethod
+	def initialize(cls, index: Optional[pd.Index] = None, columns: Optional[pd.Index] = None) -> 'ModelOutputs':
+
+		if columns is not None:
+			return cls( truth_values = pd.DataFrame( columns=columns, index=index ),
+						loss_values  = pd.DataFrame( columns=columns, index=index ),
+						logit_values = pd.DataFrame( columns=columns, index=index ),
+						pred_values  = pd.DataFrame( columns=columns, index=index ))
+
+		elif index is not None:
+			return cls( truth_values = pd.Series( index=index ),
+						loss_values  = pd.Series( index=index ),
+						logit_values = pd.Series( index=index ),
+						pred_values  = pd.Series( index=index ))
+		else:
+			raise ValueError( "Either index or columns must be passed" )
 
 	def save(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
 
@@ -302,59 +319,9 @@ class Metrics:
 
 
 @dataclass
-class HyperParametersAndPenalties:
-	MULTIPLIER: pd.Series = None
-	ADDITIVE  : pd.Series = None
-	PENALTY   : pd.DataFrame = None
-
-	def calculate_penalty_for_node(self, findings: 'Findings', node: str) -> pd.Series:
-		""" Method to calculate hierarchical penalty for a node. """
-
-		parent_metric_to_use: ParentMetricToUseNames = findings.config.technique.parent_metric_to_use
-		technique_name: TechniqueNames = findings.config.technique.technique_name
-		parent_node   : str            = findings.data.nodes.get_parent_of(child = node)
-		pred          : pd.DataFrame   = findings.model_outputs.pred_values
-		logit         : pd.DataFrame   = findings.model_outputs.logit_values
-		truth         : pd.DataFrame   = findings.model_outputs.truth_values
-		loss          : pd.DataFrame   = findings.model_outputs.loss_values
-		threshold     : pd.Series      = findings.metrics.THRESHOLD
-
-		if parent_node is None:
-			if   technique_name == TechniqueNames.LOGIT: return pd.Series(0.0, index=truth.index)
-			elif technique_name == TechniqueNames.LOSS:  return pd.Series(1.0, index=truth.index)
-			raise NotImplementedError(f"Technique {technique_name} not implemented")
-
-		def parent_exist():
-			if   parent_metric_to_use == ParentMetricToUseNames.PRED:
-				return pred[parent_node] >= threshold[parent_node]
-
-			elif parent_metric_to_use == ParentMetricToUseNames.TRUTH:
-				return truth[parent_node] >= 0.5
-
-			elif parent_metric_to_use == ParentMetricToUseNames.NONE:
-				return pd.Series(True, truth[parent_node].index)
-
-		# Calculating the initial hierarchy_penalty based on "a", "b" and "technique_name"
-		if technique_name == TechniqueNames.LOGIT:
-			hierarchy_penalty = self.MULTIPLIER[parent_node] * logit[parent_node]
-
-		elif technique_name == TechniqueNames.LOSS:
-			hierarchy_penalty = self.MULTIPLIER[parent_node] * loss[parent_node] + self.ADDITIVE[parent_node]
-
-		else:
-			raise NotImplementedError(f"Technique {technique_name} not implemented")
-
-		# Setting the hierarchy_penalty to one for samples where the parent class exist, because we can not infer any information from those samples.
-		hierarchy_penalty[parent_exist()] = 1.0
-
-		# Setting the hierarchy_penalty to 1.0 for samples where we don't have the truth label for parent class.
-		hierarchy_penalty[truth[parent_node].isnull()] = 1.0
-
-		return hierarchy_penalty
-
-	def calculate_penalty(self, findings: 'Findings'):
-		for node in findings.data.nodes.IMPACTED:
-			self.PENALTY[node] = self.calculate_penalty_for_node(findings, node)
+class HyperParameters:
+	MULTIPLIER: pd.Series = field(default_factory = pd.Series)
+	ADDITIVE  : pd.Series = field(default_factory = pd.Series)
 
 
 @dataclass
@@ -365,7 +332,7 @@ class Findings:
 	model           : ModelType       = field(default = None)
 	model_outputs   : ModelOutputs    = field(default = None, init=False)
 	metrics         : Metrics         = field(default = None, init=False)
-	hyper_parameters: HyperParametersAndPenalties = field(default = None, init=False)
+	hyper_parameters: HyperParameters = field(default = None)
 	experiment_stage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
 
 

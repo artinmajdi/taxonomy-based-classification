@@ -5,7 +5,7 @@ import multiprocessing
 import pathlib
 from collections import defaultdict
 from copy import deepcopy
-from dataclasses import dataclass, InitVar
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -18,13 +18,11 @@ from hyperopt import fmin, hp, tpe
 from scipy import stats
 from tqdm import tqdm
 
-from taxonomy.utilities.data import Data, HyperparameterNode, HyperParameters, HyperParametersAndPenalties, \
-	LoadChestXrayDatasets, LoadSaveFile, \
-	Nodes
-from taxonomy.utilities.findings import Findings, Metrics, ModelOutputs
+from taxonomy.utilities.data import Data, LoadChestXrayDatasets, Nodes
+from taxonomy.utilities.findings import Findings, HyperParameters, Metrics, ModelOutputs
 from taxonomy.utilities.model import LoadModelXRV, ModelType
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, ExperimentStageNames, \
-	ParentMetricToUseNames, SimulationOptions, TechniqueNames, ThreshTechList
+	ParentMetricToUseNames, TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import get_settings, Settings
 
 USE_CUDA = torch.cuda.is_available()
@@ -144,119 +142,157 @@ class CalculateOriginalFindings:
 
 @dataclass
 class CalculateNewFindings:
-	findings_original: InitVar[Findings]
-	hyper_parameters_and_penalties : HyperParametersAndPenalties
+	findings_original: Findings
+	hyper_parameters : HyperParameters
 
-	def __post_init__(self, findings_original: Findings):
+	def __post_init__(self):
+		self.config = self.findings_original.config
 
-		if self.hyper_parameters_and_penalties.PENALTY is None:
-			self.hyper_parameters_and_penalties.calculate_penalty(findings=findings_original)
-
-		self.findings = Findings( config = findings_original.config,
-								  data   = findings_original.data,
-								  model  = findings_original.model,
+		self.findings = Findings( config = self.findings_original.config,
+								  data   = self.findings_original.data,
+								  model  = self.findings_original.model,
 								  experiment_stage = ExperimentStageNames.NEW)
 
-		self.findings.model_outputs    = ModelOutputs()
-		self.findings.metrics          = Metrics()
-		self.findings.hyper_parameters = self.hyper_parameters_and_penalties
+	def _calculate_penalty_for_node(self, node: str) -> pd.Series:
+		""" Method to calculate hierarchical penalty for a node. """
+
+		parent_metric_to_use: ParentMetricToUseNames = self.config.technique.parent_metric_to_use
+		technique_name      : TechniqueNames         = self.config.technique.technique_name
+
+		# The hyperparameters for the current node
+		MULTIPLIER: float = self.hyper_parameters.MULTIPLIER[node]
+		ADDITIVE  : float = self.hyper_parameters.ADDITIVE[node]
+
+		# Getting the parent node's model_outputs data
+		parent_node: str       = self.findings_original.data.nodes.get_parent_of(child=node)
+		pred       : pd.Series = self.findings_original.model_outputs.pred_values[parent_node]
+		logit      : pd.Series = self.findings_original.model_outputs.logit_values[parent_node]
+		truth      : pd.Series = self.findings_original.model_outputs.truth_values[parent_node]
+		loss       : pd.Series = self.findings_original.model_outputs.loss_values[parent_node]
+		threshold  : float     = self.findings_original.metrics.THRESHOLD[parent_node]
+
+		def parent_exist():
+			if   parent_metric_to_use == ParentMetricToUseNames.PRED:
+				return pred >= threshold
+
+			elif parent_metric_to_use == ParentMetricToUseNames.TRUTH:
+				return truth >= 0.5
+
+			elif parent_metric_to_use == ParentMetricToUseNames.NONE:
+				return pd.Series(True, truth.index)
+
+		# Calculating the initial hierarchy_penalty based on "a", "b" and "technique_name"
+		if technique_name == TechniqueNames.LOGIT:
+
+			if parent_node is None:
+				return pd.Series(0.0, index=truth.index)
+
+			hierarchy_penalty = MULTIPLIER * logit
+
+		elif technique_name == TechniqueNames.LOSS:
+
+			if parent_node is None:
+				return pd.Series(1.0, index=truth.index)
+
+			hierarchy_penalty = MULTIPLIER * loss + ADDITIVE
+
+		else:
+			raise NotImplementedError(f"Technique {technique_name} not implemented")
+
+		# Setting the hierarchy_penalty to one for samples where the parent class exist, because we can not infer any information from those samples.
+		hierarchy_penalty[parent_exist()] = 1.0
+
+		# Setting the hierarchy_penalty to 1.0 for samples where we don't have the truth label for parent class.
+		hierarchy_penalty[truth.isnull()] = 1.0
+
+		return hierarchy_penalty
+
+	def calculate_for_node(self, node: str) -> 'ModelOutputs':
+
+		loss   : pd.Series = self.findings.model_outputs.loss_values[node]
+		logit  : pd.Series = self.findings.model_outputs.logit_values[node]
+		pred   : pd.Series = self.findings.model_outputs.pred_values[node]
+		truth  : pd.Series = self.findings.model_outputs.truth_values[node]
+
+		penalty: pd.Series = self._calculate_penalty_for_node(node)
 
 
-	@staticmethod
-	def do_approach(config, w, ndata):  # type: (Settings, pd.Series, Hierarchy.OUTPUT) -> Tuple[np.ndarray, np.ndarray, np.ndarray]
-
-		def do_approach2_per_node():
-
-			def calculate_loss_gradient(p, y):  # type: (np.ndarray, np.ndarray) -> pd.Series
-				return -y / (p + 1e-7) + (1 - y) / (1 - p + 1e-7)
-
-			def update_pred(l_new, l_gradient):  # type: (pd.Series, pd.Series) -> pd.Series
-				p_new = np.exp( -l_new )
-				condition = l_gradient >= 0
-				p_new[condition] = 1 - p_new[condition]
-				return p_new
+		def do_loss():
+			nonlocal logit, pred, loss
 
 			# Measuring the new loss values
-			loss_new = w.mul( ndata.data.loss.values, axis=0 )
+			loss = penalty * loss
 
-			# Calculating the loss gradient for the old results to find the direction of changes for the new predicted probabilities
-			loss_gradient = calculate_loss_gradient( p=ndata.data.pred.to_numpy(), y=ndata.data.truth.to_numpy() )
+			# Calculating the loss gradient to find the direction of changes
+			loss_gradient = -truth / (pred + 1e-7) + (1 - truth) / (1 - pred + 1e-7)
 
 			# Calculating the new predicted probability
-			pred_new = update_pred( l_new=loss_new, l_gradient=loss_gradient )
+			pred = np.exp( -loss )
 
-			return pred_new.to_numpy(), loss_new.to_numpy()
+			condition = loss_gradient >= 0
+			pred[condition] = 1 - pred[condition]
 
-		def do_approach1_per_node():
+			# Assigning Nan to the logits (since it won't be used).
+			logit = pd.DataFrame( index=truth.index, columns=truth.columns, data=np.nan)
+
+		def do_logit():
+			nonlocal logit, pred, loss
 
 			# Measuring the new loss values
-			logit_new = w.add( ndata.data.logit, axis=0 )
+			logit = penalty + logit
 
 			# Calculating the new predicted probability
-			pred_new = 1 / (1 + np.exp( -logit_new ))
+			pred = 1 / (1 + np.exp( -logit ))
 
-			return pred_new.to_numpy(), logit_new.to_numpy()
+			loss = pd.DataFrame( index=truth.index, columns=truth.columns, data=np.nan)
 
-		if  config.technique_name is TechniqueNames.LOGIT:
-			pred_new, logit_new = do_approach1_per_node()
-			loss_new = np.ones(pred_new.shape) * np.nan
+		if  self.config.technique_name == TechniqueNames.LOGIT:
+			do_logit()
 
-		elif config.technique_name is TechniqueNames.LOSS:
-			pred_new, loss_new  = do_approach2_per_node()
-			logit_new = np.ones(pred_new.shape) * np.nan
-		else:
-			raise ValueError(' technique_name is not supported')
+		elif self.config.technique_name == TechniqueNames.LOSS:
+			do_loss()
 
-		return pred_new, logit_new, loss_new
+		return ModelOutputs( pred_values=pred, logit_values=logit, loss_values=loss, truth_values=truth )
 
-	@staticmethod
-	def calculate_per_node(node: str, data: Data, config: Settings, hyperparameters: HyperParameters, thresh_technique: ThreshTechList) -> Data:
+	def calculate(self) -> 'CalculateNewFindings':
 
-		# Getting the hierarchy_penalty for the node
-		data.NEW.pred[node], data.NEW.logit[node], data.NEW.loss[node] = CalculateNewFindings.do_approach( config=config, w=data.NEW.hierarchy_penalty[node], ndata=ndata )
+		truth_values = self.findings_original.model_outputs.truth_values
 
-		data.NEW = TaxonomyXRV.calculating_threshold_and_metrics_per_node(node=node, findings=data.NEW, thresh_technique=x)
+		# Initializing the model_outputs with empty dataframes
+		self.findings.model_outputs = ModelOutputs.initialize(columns=truth_values.columns, index=truth_values.index)
 
-		return data
+		for node in self.findings_original.model.pathologies:
+			model_outputs_node = self.calculate_for_node(node=node)
 
-	@staticmethod
-	def calculate(data, config, hyperparameters):  # type: (Data, Settings, Dict[str, pd.DataFrame]) -> Data
+			self.findings.model_outputs.truth_values[node] = model_outputs_node.truth_values
+			self.findings.model_outputs.pred_values[node]  = model_outputs_node.pred_values
+			self.findings.model_outputs.logit_values[node] = model_outputs_node.logit_values
+			self.findings.model_outputs.loss_values[node]  = model_outputs_node.loss_values
 
-		for node in data.labels.nodes.non_null:
-			 data = CalculateNewFindings.calculate_per_node( node=node, data=data, config=config, hyperparameters=hyperparameters, thresh_technique=x )
+		# Calculating the metrics
+		self.findings.metrics = Metrics.calculate(config=self.config, REMOVE_NULL=True, model_outputs=self.findings.model_outputs)
 
-		data.NEW.results = { key: getattr( data.NEW, key ) for key in ['metrics', 'pred', 'logit', 'truth', TechniqueNames.LOSS.modelName, 'hierarchy_penalty'] }
+		return self
 
-		return data
+	def save(self) -> 'CalculateNewFindings':
 
-	def do_calculate(self):
+		# Saving model_outputs to disc
+		self.findings.model_outputs.save(config=self.config, experiment_stage=ExperimentStageNames.NEW)
 
-		# Calculating the new findings
-		params = {key: getattr(self, key) for key in ['data', 'config', 'hyperparameters']}
-		self.data = CalculateNewFindings.calculate(**params)
+		# Calculating the metrics & saving them to disc
+		self.findings.metrics.save(config=self.config, experiment_stage=ExperimentStageNames.NEW)
 
-		# Adding the ORIGINAL findings to the graph nodes
-		self.data.Hierarchy_cls.update_graph( findings_new=self.data.NEW.results )
+		return self
 
-		# Saving the new findings
-		LoadSaveFindings(self.config, self.save_path_full).save( self.data.NEW.results )
+	def load(self) -> 'CalculateNewFindings':
 
-	@classmethod
-	def get_updated_data(cls, model: torch.nn.Module, data: Data, hyperparameters: dict, config: Settings, technique_name: TechniqueNames) -> Data:
+		# Loading model_outputs from disc
+		self.findings.model_outputs = ModelOutputs().load(config=self.config, experiment_stage=ExperimentStageNames.NEW)
 
-		# Initializing the class
-		NEW = cls(model=model, data=data, hyperparameters=hyperparameters, config=config, technique_name=technique_name)
+		# Loading the metrics from disc
+		self.findings.metrics = Metrics().load(config=self.config, experiment_stage=ExperimentStageNames.NEW)
 
-		if config.do_findings_new == 'calculate':
-			NEW.do_calculate()
-		else:
-			NEW.data.NEW.results = LoadSaveFindings( NEW.config, NEW.save_path_full ).load(
-			)
-
-			# Adding the ORIGINAL findings to the graph nodes
-			NEW.data.Hierarchy_cls.update_graph( findings_new=NEW.data.NEW.results )
-
-		return NEW.data
+		return self
 
 
 class HyperParameterTuning:
@@ -388,18 +424,6 @@ class HyperParameterTuning:
 			HP.data.Hierarchy_cls.update_graph(hyperparameters=HP.hyperparameters)
 
 		return HP.hyperparameters
-
-
-def deserialize_object(state, cls):
-	obj = cls.__new__(cls)
-	for attr, value in state.items():
-		if isinstance(value, dict) and 'pred' in value:
-			setattr(obj, attr, pd.DataFrame.from_dict(value))
-		elif isinstance(value, dict):
-			setattr(obj, attr, deserialize_object(value, globals()[attr]))
-		else:
-			setattr(obj, attr, value)
-	return obj
 
 
 class TaxonomyXRV:
