@@ -3,7 +3,7 @@ import json
 import pathlib
 import sys
 from dataclasses import dataclass, field, InitVar
-from typing import Any, Union
+from typing import Any, Optional, TypeAlias, Union
 
 from pydantic import BaseModel, conint, confloat, Field, FieldValidationInfo
 from pydantic.functional_validators import field_validator
@@ -13,24 +13,29 @@ from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricN
 	ParentMetricToUseNames, SimulationOptions, TechniqueNames, ThreshTechList
 
 
+PathNoneType: TypeAlias = Union[pathlib.Path, None]
+
 @dataclass
 class DatasetInfo:
 	datasetName      : DatasetNames
-	path_all_datasets: InitVar[pathlib.Path]
-	views	         : InitVar[list[str]]
+	path_all_datasets: pathlib.Path
+	views	         : list[str]
 	data_mode        : InitVar[DataModes] = None
-	path             : pathlib.Path  	  = field(init=False)
-	csv_path         : pathlib.Path		  = field(init=False)
-	metadata_path    : pathlib.Path       = field(init=False)
+	path             : PathNoneType  	  = field(init=False)
+	csv_path         : PathNoneType		  = field(init=False)
+	metadata_path    : PathNoneType       = field(init=False)
 	params_config    : dict[str, Any]     = field(init=False)
 
-	def __post_init__(self, path_all_datasets: pathlib.Path, views: list[str], data_mode: DataModes):
-		self.path          = path_all_datasets / self._get_dataset_relative_path(data_mode)
-		self.csv_path      = path_all_datasets / self._get_csv_relative_path(data_mode)
-		self.metadata_path = path_all_datasets / self._get_metadata_relative_path()
+	def __post_init__(self, data_mode: DataModes):
 
-		self.params_config = {'imgpath':self.path, 'views':views, 'csvpath':self.csv_path, 'metacsvpath':self.metadata_path}
+		self.path          = self.resolve_path(self._get_dataset_relative_path(data_mode))
+		self.csv_path      = self.resolve_path(self._get_csv_relative_path(data_mode))
+		self.metadata_path = self.resolve_path(self._get_metadata_relative_path())
 
+		self.params_config = {'imgpath':self.path, 'views':self.views, 'csvpath':self.csv_path, 'metacsvpath':self.metadata_path}
+
+	def resolve_path(self, base_path: PathNoneType) -> PathNoneType:
+		return self.path_all_datasets / base_path if base_path is not None else None
 
 	def _get_dataset_relative_path(self, data_mode: DataModes=None):
 		dataset_path_dict = {
@@ -61,28 +66,25 @@ class DatasetInfo:
 		return meta_data_dict.get(self.datasetName.value)
 
 class DatasetSettings(BaseModel):
-	data_mode        : DataModes    = DataModes.TRAIN
-	views            : list[str]    = Field(default_factory = lambda: ['PA', 'AP'])
+	data_mode        : DataModes = DataModes.TRAIN
+	views            : list[str] = Field(default_factory = lambda: ['PA', 'AP'])
 	path_all_datasets: pathlib.Path = pathlib.Path('./datasets')
-	datasetNames  : list[DatasetNames] = Field( default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT])
-	datasetInfoList: list[DatasetInfo] = Field(default=None)
-	non_null_samples: bool          = True
+	datasetNames     : list[DatasetNames] = Field(default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT])
+	datasetInfoList  : list[DatasetInfo] = Field(default = None)
+	non_null_samples : bool = True
 	max_samples      : conint(gt=0) = 1000
-	train_test_ratio : confloat(ge=0, le=1) = 0.7
+	train_test_ratio : confloat(ge=0,le=1) = 0.7
 
 	@field_validator('path_all_datasets', mode='after')
-	@classmethod
 	def make_path_absolute(cls, v: pathlib.Path):
 		return v.resolve()
 
-	@field_validator('datasetInfoList', mode='after')
-	@classmethod
+	@field_validator('datasetInfoList', mode='before')
 	def post_process_info(cls, v: None, info: FieldValidationInfo) -> list[DatasetInfo]:
-		"""	Convert the list of dataset names to a list of DatasetInfo objects	"""
 		return [ DatasetInfo(   path_all_datasets = info.data['path_all_datasets'],
 								data_mode         = info.data['data_mode'],
 								views 			  = info.data['views'],
-								datasetName       = DatasetNames(dt))
+								datasetName       = dt )
 				 for dt in info.data['datasetNames']]
 
 class TrainingSettings(BaseModel):
@@ -124,7 +126,6 @@ class OutputSettings(BaseModel):
 	path: pathlib.Path = pathlib.Path('../outputs')
 
 	@field_validator('path', mode='after')
-	@classmethod
 	def make_path_absolute(cls, v: pathlib.Path):
 		return v.resolve()
 
@@ -142,7 +143,7 @@ class Settings(BaseModel):
 		case_sensitive       = False
 		str_strip_whitespace = True
 
-def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings:
+def get_settings(argv=None, jupyter=True, config_path='config.json') -> Settings:
 
 	def parse_args() -> dict:
 		"""	Getting the arguments from the command line
@@ -196,7 +197,7 @@ def get_settings(argv=None, jupyter=True, config_name='config.json') -> Settings
 	def get_config(args_dict: dict) -> Union[Settings,ValueError]:
 
 		# Loading the config.json file
-		config_dir = pathlib.Path(args_dict.get('config') or config_name).resolve()
+		config_dir = pathlib.Path( args_dict.get('config') or config_path ).resolve()
 
 		if not config_dir.exists():
 			return ValueError(f'Config file not found at {config_dir}')

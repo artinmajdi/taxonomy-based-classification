@@ -1,19 +1,18 @@
 from dataclasses import dataclass, field
-from functools import cached_property, singledispatch, singledispatchmethod, wraps
-from typing import Optional, Tuple, TypeAlias, Union
+from functools import cached_property, wraps
+from typing import Tuple, TypeAlias, Union
 
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import sklearn
-import torchxrayvision as xrv
 from matplotlib import pyplot as plt
 
 from taxonomy.utilities.data import Data, LoadSaveFile
+from taxonomy.utilities.model import ModelType
 from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, \
 	TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import Settings
-from taxonomy.utilities.model import ModelType
 
 Array_Series: TypeAlias = Union[np.ndarray, pd.Series]
 
@@ -378,7 +377,6 @@ class FindingsAllTechniques:
 
 			# Calculate the ROC curve and AUC
 			def get_fpr_tpr_auc(pred_node, truth_node, technique: TechniqueNames, roc_auc):
-				nonlocal technique
 
 				def get():
 					nonlocal fpr, tpr
@@ -397,9 +395,9 @@ class FindingsAllTechniques:
 			# Plot the ROC curve
 			lines, labels = [], []
 
-			for methodName in TechniqueNames.members():
-				data = getattr( self, methodName.lower() )
-				technique = TechniqueNames[methodName]
+			for techniqueName in TechniqueNames.members():
+				data = getattr( self, techniqueName.lower() )
+				technique = TechniqueNames[techniqueName]
 
 				line = get_fpr_tpr_auc( pred_node=data.pred[node], truth_node=truth[node], technique=technique,
 										roc_auc=data.auc_acc_f1[node][EvaluationMetricNames.AUC.name] )
@@ -471,7 +469,7 @@ class Tables:
 
 		def get():
 			columns = pd.MultiIndex.from_product([DatasetNames.members(), TechniqueNames.members()],
-			                                     names=['dataset_full', 'methodName'])
+			                                     names=['dataset_full', 'techniqueName'])
 			AUC = pd.DataFrame(columns = columns)
 			F1  = pd.DataFrame(columns = columns)
 			ACC = pd.DataFrame(columns = columns)
@@ -481,7 +479,7 @@ class Tables:
 			BASELINE = TechniqueNames.BASELINE.name
 
 			for dt in DatasetNames.members():
-				df = TaxonomyXRV.run_full_experiment(methodName=TechniqueNames.LOGIT, datasetName=dt)
+				df = TaxonomyXRV.run_full_experiment(techniqueName=TechniqueNames.LOGIT, datasetName=dt)
 				AUC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
@@ -490,7 +488,7 @@ class Tables:
 				F1[ (dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
 				ACC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
 
-				df = TaxonomyXRV.run_full_experiment(methodName=TechniqueNames.LOSS, datasetName=dt)
+				df = TaxonomyXRV.run_full_experiment(techniqueName=TechniqueNames.LOSS, datasetName=dt)
 				AUC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
 				F1[ (dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
 				ACC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]

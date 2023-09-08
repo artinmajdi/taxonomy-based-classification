@@ -23,17 +23,35 @@ USE_CUDA = torch.cuda.is_available()
 
 
 @dataclass
+class Hyperparameter:
+	MULTIPLIER: float = 1.0
+	ADDITIVE  : float = 0.0
+
+
+@dataclass
 class Nodes:
-	labels  : InitVar[pd.DataFrame]
-	default_taxonomy_init: InitVar[dict] = None
-	graph   :     nx.DiGraph = field(init=False)
-	classes :            set = field(init=False)
-	NON_NULL:            set = field(init=False)
-	IMPACTED:            set = field(init=False)
-	_default_taxonomy:  dict = field(init=False)
+	labels               : InitVar[pd.DataFrame]
+	default_taxonomy_init: InitVar[dict]         = None
+	graph                : nx.DiGraph            = field(init = False)
+	classes              : set                   = field(init = False)
+	NON_NULL             : set                   = field(init = False)
+	IMPACTED             : set                   = field(init = False)
+	_default_taxonomy    : dict                  = field(init = False)
 
 	def __post_init__(self, labels: pd.DataFrame, default_taxonomy_init: dict = None):
+		"""
+		    Initialization method called automatically after object creation.
 
+		    :param labels: A dataframe containing labels for each node.
+		    :param default_taxonomy_init: (Optional) A dictionary representing the default taxonomy initialization.
+
+		    :return: None
+
+		    Attributes:
+		    - _default_taxonomy: A dictionary representing the default taxonomy.
+		    - classes: A set containing the column names from the labels dataframe.
+
+		"""
 		self._default_taxonomy: dict = default_taxonomy_init or {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
 
 		self.classes = set(labels.columns.to_list())
@@ -91,9 +109,10 @@ class Nodes:
 		return graph
 
 
-	def add_hyperparameters_to_node(self, parent_node: str, child_node: str, hyperparameter: dict[HyperparameterNames, float]):
-		for hp_name in hyperparameter:
-			self.graph.edges[parent_node, child_node][hp_name] = hyperparameter[hp_name]
+	def add_hyperparameters_to_node(self, node: str, hyperparameter: Hyperparameter):
+		parent_node = self.get_parent_of( node )
+		self.graph.edges[parent_node, node] = hyperparameter
+
 
 	def get_hyperparameters_of_node(self, parent_node: str, child_node: str) -> dict[HyperparameterNames, float]:
 		return self.graph.edges[parent_node, child_node]

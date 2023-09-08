@@ -124,6 +124,7 @@ class HyperparameterNames(enum.Enum):
 class ParentMetricToUseNames( enum.Enum ):
 	TRUTH: str = 'ground_truth'
 	PRED : str = 'predicted_probabilities'
+	NONE : str = 'none'
 
 
 @members

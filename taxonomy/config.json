@@ -1,11 +1,12 @@
 {
   "dataset": {
-    "datasetNames"     : ["CheX", "NIH", "PC"],
+    "data_mode"        : "train",
     "views"            : ["AP", "PA"],
     "path_all_datasets": "F:/Datasets",
-    "data_mode"        : "train",
-    "max_samples"      : 1000,
+    "datasetNames"     : ["chex", "nih", "pc"],
+    "datasetInfoList"  : [],
     "not_null_samples" : true,
+    "max_samples"      : 1000,
     "train_test_ratio" : 0.7
   },
   "training": {
