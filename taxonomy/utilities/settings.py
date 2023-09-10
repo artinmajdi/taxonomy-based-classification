@@ -108,7 +108,7 @@ class ModelSettings(BaseModel):
 class SimulationSettings(BaseModel):
 	findings_original  : SimulationOptions = SimulationOptions.RUN_SIMULATION
 	findings_new       : SimulationOptions = SimulationOptions.RUN_SIMULATION
-	hyperparameters    : SimulationOptions = SimulationOptions.RUN_SIMULATION
+	hyper_parameters    : SimulationOptions = SimulationOptions.RUN_SIMULATION
 	metrics            : SimulationOptions = SimulationOptions.RUN_SIMULATION
 	use_parallelization: bool = True
 	num_workers        : conint(gt         = 0) = 1

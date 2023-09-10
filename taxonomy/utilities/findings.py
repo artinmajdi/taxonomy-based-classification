@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import sklearn
+from hyperopt import fmin, hp, tpe
 from matplotlib import pyplot as plt
 
 from taxonomy.utilities.data import Data, LoadSaveFile
@@ -13,6 +14,7 @@ from taxonomy.utilities.model import ModelType
 from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, \
 	ParentMetricToUseNames, TechniqueNames, ThreshTechList
 from taxonomy.utilities.settings import Settings
+from taxonomy.utilities.utils import CalculateNewFindings
 
 Array_Series: TypeAlias = Union[np.ndarray, pd.Series]
 
@@ -158,27 +160,34 @@ class CalculateMetrics:
 
 
 @dataclass
+class ModelOutputsNode:
+	truth: pd.Series = None
+	loss : pd.Series = None
+	logit: pd.Series = None
+	pred : pd.Series = None
+
+@dataclass
 class ModelOutputs:
 	""" Class for storing model-related findings. """
-	truth_values: Union[pd.DataFrame, pd.Series] = None
-	loss_values : Union[pd.DataFrame, pd.Series] = None
-	logit_values: Union[pd.DataFrame, pd.Series] = None
-	pred_values : Union[pd.DataFrame, pd.Series] = None
+	truth: pd.DataFrame = None
+	loss : pd.DataFrame = None
+	logit: pd.DataFrame = None
+	pred : pd.DataFrame = None
 
 	@classmethod
 	def initialize(cls, index: Optional[pd.Index] = None, columns: Optional[pd.Index] = None) -> 'ModelOutputs':
 
 		if columns is not None:
-			return cls( truth_values = pd.DataFrame( columns=columns, index=index ),
-						loss_values  = pd.DataFrame( columns=columns, index=index ),
-						logit_values = pd.DataFrame( columns=columns, index=index ),
-						pred_values  = pd.DataFrame( columns=columns, index=index ))
+			return cls( truth= pd.DataFrame( columns=columns, index=index ),
+						loss= pd.DataFrame( columns=columns, index=index ),
+						logit = pd.DataFrame( columns=columns, index=index ),
+						pred  = pd.DataFrame( columns=columns, index=index ) )
 
 		elif index is not None:
-			return cls( truth_values = pd.Series( index=index ),
-						loss_values  = pd.Series( index=index ),
-						logit_values = pd.Series( index=index ),
-						pred_values  = pd.Series( index=index ))
+			return cls( truth= pd.Series( index=index ),
+						loss= pd.Series( index=index ),
+						logit = pd.Series( index=index ),
+						pred  = pd.Series( index=index ) )
 		else:
 			raise ValueError( "Either index or columns must be passed" )
 
@@ -188,10 +197,10 @@ class ModelOutputs:
 		output_path.parent.mkdir(parents=True, exist_ok=True)
 
 		with pd.ExcelWriter( output_path ) as writer:
-			self.truth_values.to_excel( writer, sheet_name = 'truth_values' )
-			self.loss_values.to_excel( writer , sheet_name = 'loss_values' )
-			self.logit_values.to_excel( writer, sheet_name = 'logit_values' )
-			self.pred_values.to_excel( writer , sheet_name = 'pred_values' )
+			self.truth.to_excel( writer, sheet_name ='truth' )
+			self.loss.to_excel( writer, sheet_name ='loss' )
+			self.logit.to_excel( writer, sheet_name = 'logit' )
+			self.pred.to_excel( writer , sheet_name = 'pred' )
 		return self
 
 	def load(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
@@ -199,11 +208,24 @@ class ModelOutputs:
 		input_path = config.output.path / f'{experiment_stage}/model_outputs.xlsx'
 
 		if input_path.is_file():
-			self.truth_values = pd.read_excel( input_path, sheet_name  = 'truth_values')
-			self.loss_values  = pd.read_excel( input_path, sheet_name  = 'loss_values' )
-			self.logit_values = pd.read_excel( input_path, sheet_name  = 'logit_values')
-			self.pred_values  = pd.read_excel( input_path, sheet_name  = 'pred_values' )
+			self.truth = pd.read_excel( input_path, sheet_name  ='truth' )
+			self.loss  = pd.read_excel( input_path, sheet_name  ='loss' )
+			self.logit = pd.read_excel( input_path, sheet_name  = 'logit')
+			self.pred  = pd.read_excel( input_path, sheet_name  = 'pred' )
 		return self
+
+	def __getitem__(self, node: str) -> 'ModelOutputsNode':
+		return ModelOutputsNode( truth=self.truth[node], loss=self.loss[node],
+								 logit=self.logit[node], pred=self.pred[node] )
+
+	def __setitem__(self, node: str, value: ModelOutputsNode):
+
+		assert isinstance( value, ModelOutputsNode ), "Value must be of type ModelOutputsNode"
+
+		self.truth[node] = value.truth
+		self.loss[node]  = value.loss
+		self.logit[node] = value.logit
+		self.pred[node]  = value.pred
 
 
 Array_Series_DataFrame: TypeAlias = Union[np.ndarray, pd.Series, pd.DataFrame]
@@ -251,15 +273,15 @@ class Metrics:
 	def calculate(cls, config: Settings, REMOVE_NULL: bool=True, **kwargs) -> 'Metrics':
 		# sourcery skip: raise-specific-error
 		try:
-			y    = kwargs['model_outputs'].truth_values if 'model_outputs' in kwargs else kwargs['y']
-			yhat = kwargs['model_outputs'].pred_values  if 'model_outputs' in kwargs else kwargs['yhat']
+			y    = kwargs['model_outputs'].truth if 'model_outputs' in kwargs else kwargs['y']
+			yhat = kwargs['model_outputs'].pred  if 'model_outputs' in kwargs else kwargs['yhat']
 
 		except KeyError as e:
 			" The KeyError would occur if the else clauses are reached and kwargs does not contain the keys 'y' or 'yhat'."
 			raise KeyError(f"Key {e} not found in kwargs") from e
 
 		except AttributeError as e:
-			"The AttributeErrorwould occur if the model_outputs object does not have the attributes truth_values or pred_values."
+			"The AttributeErrorwould occur if the model_outputs object does not have the attributes truth or pred."
 			raise AttributeError(f"Attribute {e} not found in kwargs") from e
 
 		except TypeError as e:
@@ -318,35 +340,109 @@ class Metrics:
 		return self
 
 
-@dataclass
-class HyperParameters:
-	MULTIPLIER: pd.Series = field(default_factory = pd.Series)
-	ADDITIVE  : pd.Series = field(default_factory = pd.Series)
-
 
 @dataclass
 class Findings:
 	""" Class for storing overall findings including configuration, data, and metrics. """
 	config          : Settings
-	data            : Data            = field(default = None)
-	model           : ModelType       = field(default = None)
-	model_outputs   : ModelOutputs    = field(default = None, init=False)
-	metrics         : Metrics         = field(default = None, init=False)
-	hyper_parameters: HyperParameters = field(default = None)
+	data            : Data            = field( default = None )
+	model           : ModelType       = field( default = None )
+	model_outputs   : ModelOutputs    = field( default = None  , init = False )
+	metrics         : Metrics         = field( default = None  , init = False )
+	hyper_parameters: 'HyperParameters' = field( default = None )
 	experiment_stage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
 
 
 @dataclass
+class HyperPrametersNode:
+	MULTIPLIER: float = 1.0
+	ADDITIVE  : float = 0.0
+
+
+# TODO: working on this class
+@dataclass
+class HyperParameters:
+	MULTIPLIER: pd.Series = field(default_factory = pd.Series)
+	ADDITIVE  : pd.Series = field(default_factory = pd.Series)
+
+	@classmethod
+	def initialize(cls, config: Settings=None, classes: Any=None) -> 'HyperParameters':
+
+		logit = config.technique.technique_name == TechniqueNames.LOGIT
+		ADDITIVE   = pd.Series( 0.0, index=classes)
+		MULTIPLIER = pd.Series( 0.0 if logit else 1.0, index=classes)
+
+		return cls(MULTIPLIER=MULTIPLIER, ADDITIVE=ADDITIVE)
+
+	def calculate_for_node(self, model_outputs: ModelOutputs, config: Settings, node: str) -> list[float]:
+
+		search_space_multiplier = config.hyperparameter_tuning.search_space_multiplier
+		search_space_additive   = config.hyperparameter_tuning.search_space_additive
+
+		truth = model_outputs.truth[node]
+		pred  = model_outputs.pred[node]
+
+		truth, pred = remove_null_samples( y=truth, yhat=pred, RAISE_ValueError_IF_EMPTY=True )
+
+		def objective_function(args: dict[str, float]) -> float:
+
+			self.MULTIPLIER[node], self.ADDITIVE[node] = args['MULTIPLIER'], args['ADDITIVE']
+
+			# Updating the hyper_parameters for the current node and thresholding technique
+
+			data2: Data = CalculateNewFindings.calculate_per_node( node=node, data=data, config=config, hyper_parameters=hp_in, thresh_technique=thresh_technique)
+
+			# Returning the error
+			return 1 - data2.NEW.metrics[thresh_technique, node][config.optimization_metric.upper()]
+
+		# Run the optimization
+		best = fmin(
+				fn        = lambda args : objective_function( args=args, hp_in=hyper_parameters),
+				space     = dict( MULTIPLIER = hp.uniform('MULTIPLIER', *search_space_multiplier),
+								  ADDITIVE   = hp.uniform('ADDITIVE'  , *search_space_additive)),
+				algo      = tpe.suggest ,     # Optimization algorithm (Tree-structured Parzen Estimator)
+				max_evals = config.max_evals , # Maximum number of evaluations
+				verbose   = True ,	          # Verbosity level (2 for detailed information)
+				)
+
+		return [ best['a'] , best['b'] ]
+
+	@classmethod
+	def calculate(cls, findings_original: Findings) -> 'HyperParameters':
+
+		config        = findings_original.config
+		model_outputs = findings_original.model_outputs
+		classes       = findings_original.data.nodes.classes
+
+		# Initializing the hyperparameters
+		HP = cls.initialize( config=config, classes=classes )
+
+		CNF = CalculateNewFindings( findings_original=findings_original, hyper_parameters=HP)
+
+		for node in classes:
+			HP.MULTIPLIER[node], HP.ADDITIVE[node] = HP.calculate_for_node( model_outputs=model_outputs, config=config, node=node)
+
+
+		return HP
+
+	def __getitem__(self, node) -> HyperPrametersNode:
+		return HyperPrametersNode( MULTIPLIER=self.MULTIPLIER[node], ADDITIVE=self.ADDITIVE[node] )
+
+	def __setitem__(self, node, value: HyperPrametersNode):
+		assert isinstance( value, HyperPrametersNode ), "Value must be of type HyperPrametersNode"
+		self.MULTIPLIER[node], self.ADDITIVE[node] = value.MULTIPLIER, value.ADDITIVE
+
+@dataclass
 class FindingsTrainTest:
-	train: Findings = field( default=None )
-	test: Findings = field( default=None )
+	TRAIN: Findings = field( default = None )
+	TEST : Findings = field( default = None )
 
 
 @dataclass
 class FindingsAllTechniques:
-	loss: FindingsTrainTest = field( default=None )
-	logit: FindingsTrainTest = field( default=None )
-	baseline: FindingsTrainTest = field( default=None )
+	LOSS    : FindingsTrainTest = field( default = None )
+	LOGIT   : FindingsTrainTest = field( default = None )
+	BASELINE: FindingsTrainTest = field( default = None )
 
 	def _get_obj(self):
 		for objName in ['loss', 'logit', 'baseline']:
@@ -358,17 +454,17 @@ class FindingsAllTechniques:
 
 	@property
 	def nodes(self):
-		return self._get_obj().test.data.nodes
+		return self._get_obj().TEST.data.nodes
 
 	@property
 	def config(self):
-		return self._get_obj().test.config
+		return self._get_obj().TEST.config
 
 	def plot_roc_curves(self, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
 
 		impacted_nodes = self.nodes.IMPACTED
 		list_parent_nodes = list( self.nodes.taxonomy.keys() )
-		truth = self.baseline.test.model_outputs.truth_values
+		truth = self.BASELINE.TEST.model_outputs.truth
 
 		# Set up the grid
 		def setup_plot():
@@ -465,10 +561,7 @@ class FindingsAllTechniques:
 			LoadSaveFile( file_path ).save( data=fig )
 
 
-@dataclass
-class HyperparameterNode:
-	MULTIPLIER: float = 1.0
-	ADDITIVE  : float = 0.0
+
 
 '''
 class Tables:
