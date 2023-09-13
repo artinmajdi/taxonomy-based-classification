@@ -1,170 +1,45 @@
-from dataclasses import dataclass, field, InitVar
-from functools import cached_property, wraps
-from typing import Any, Optional, Tuple, TypeAlias, Union
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Optional, Union
 
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import sklearn
-from hyperopt import fmin, hp, tpe
+import torch
 from matplotlib import pyplot as plt
 
-from taxonomy.utilities.data import Data, LoadSaveFile
+from taxonomy.utilities.data import Data, LoadSaveFile, Node
+from taxonomy.utilities.metrics import Metrics
 from taxonomy.utilities.model import ModelType
-from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, \
-	ParentMetricToUseNames, TechniqueNames, ThreshTechList
+from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, TechniqueNames
 from taxonomy.utilities.settings import Settings
-from taxonomy.utilities.utils import CalculateNewFindings
 
-Array_Series: TypeAlias = Union[np.ndarray, pd.Series]
-
-
-def get_y_yhat_flag(*args, **kwargs) -> Tuple[Array_Series, Array_Series, bool]:
-	""" Extract y and yhat from keyword arguments or positional arguments. """
-
-	# Extract y and yhat from keyword arguments
-	y, yhat, RAISE_ValueError_IF_EMPTY = kwargs.get( 'y' ), kwargs.get( 'yhat' ), kwargs.get(
-		'RAISE_ValueError_IF_EMPTY', False )
-
-	# If y and yhat are not passed as keyword arguments, attempt to get them from positional arguments.
-	if y is None and args:
-		y, *args = args
-
-	if yhat is None and args:
-		yhat, *args = args
-
-	return y, yhat, RAISE_ValueError_IF_EMPTY
-
-
-def validating_label_vectors_decorator(func):
-	@wraps( func )
-	def wrapper(*args, **kwargs):
-
-		y, yhat, _ = get_y_yhat_flag( *args, **kwargs )
-
-		if y is None or yhat is None:
-			raise ValueError( "y and yhat must be passed as keyword arguments or positional arguments" )
-
-		if y.shape != yhat.shape:
-			raise ValueError( "y and yhat must have the same shape" )
-
-		if y.dtype != yhat.dtype:
-			raise ValueError( "y and yhat must be of the same type" )
-
-		if not isinstance( y, (np.ndarray, pd.Series) ):
-			raise ValueError( "y and yhat must be numpy arrays or pandas series" )
-
-		if isinstance( y, np.ndarray ) and len( y.shape ) == 2:
-			if y.shape[1] != 1:
-				raise ValueError( "y & yhat must be 1D arrays" )
-			y = y.flatten()
-			yhat = yhat.flatten()
-
-		kwargs['y'], kwargs['yhat'] = y, yhat
-		return func( *args, **kwargs )
-
-	return wrapper
-
-
-@validating_label_vectors_decorator
-def remove_null_samples(y: Array_Series, yhat: Array_Series, RAISE_ValueError_IF_EMPTY: bool = False) -> Tuple[
-	Array_Series, Array_Series]:
-	""" Filter out null samples and check if calculation should proceed. """
-
-	non_null = ~np.isnan( y ) if isinstance( y, np.ndarray ) else y.notnull()
-
-	if RAISE_ValueError_IF_EMPTY and (not non_null.any()):
-		raise ValueError( "y and yhat must contain at least one non-null value" )
-
-	return y[non_null], yhat[non_null]
-
-
-@dataclass
-class ROC:
-	y: np.ndarray
-	yhat: np.ndarray
-	REMOVE_NULL: bool = True
-	THRESHOLD: float = field( default=None )
-	FPR: np.ndarray = field( default=None )
-	TPR: np.ndarray = field( default=None )
-
-	def __post_init__(self):
-		if self.REMOVE_NULL:
-			self.y, self.yhat = remove_null_samples( y=self.y, yhat=self.yhat, RAISE_ValueError_IF_EMPTY=False )
-
-	def calculate(self) -> 'ROC':
-		if self.y.size > 0:
-			fpr, tpr, thr = sklearn.metrics.roc_curve( self.y, self.yhat )
-			self.FPR, self.TPR, self.THRESHOLD = fpr, tpr, thr[np.argmax( tpr - fpr )]
-		return self
-
-
-@dataclass
-class PrecisionRecall:
-	y: np.ndarray
-	yhat: np.ndarray
-	REMOVE_NULL: bool = True
-	THRESHOLD: float = field( default=None )
-	PPV: np.ndarray = field( default=None )
-	RECALL: np.ndarray = field( default=None )
-	F_SCORE: np.ndarray = field( default=None )
-
-	def __post_init__(self):
-		if self.REMOVE_NULL:
-			self.y, self.yhat = remove_null_samples( y=self.y, yhat=self.yhat, RAISE_ValueError_IF_EMPTY=False )
-
-	def calculate(self) -> 'PrecisionRecall':
-		if self.y.size > 0:
-			ppv, recall, th = sklearn.metrics.precision_recall_curve( self.y, self.yhat )
-			f_score = 2 * (ppv * recall) / (ppv + recall)
-			self.THRESHOLD, self.PPV, self.RECALL, self.F_SCORE = th[np.argmax( f_score )], ppv, recall, f_score
-		return self
-
-
-@dataclass
-class CalculateMetrics:
-	y: np.ndarray
-	yhat: np.ndarray
-	REMOVE_NULL: bool = True
-	thresh_technique: ThreshTechList = ThreshTechList.ROC
-
-	def __post_init__(self):
-		if self.REMOVE_NULL:
-			self.y, self.yhat = remove_null_samples( y=self.y, yhat=self.yhat, RAISE_ValueError_IF_EMPTY=False )
-
-	@cached_property
-	def THRESHOLD(self) -> float:
-
-		if self.thresh_technique == ThreshTechList.DEFAULT:
-			return 0.5
-
-		if self.thresh_technique == ThreshTechList.ROC:
-			return ROC( y=self.y, yhat=self.yhat, REMOVE_NULL=False ).calculate().THRESHOLD
-
-		if self.thresh_technique == ThreshTechList.PRECISION_RECALL:
-			return PrecisionRecall( y=self.y, yhat=self.yhat, REMOVE_NULL=False ).calculate().THRESHOLD
-
-		raise NotImplementedError( f"ThreshTechList {self.thresh_technique} not implemented" )
-
-	@cached_property
-	def AUC(self) -> float:
-		return sklearn.metrics.roc_auc_score( self.y, self.yhat )
-
-	@cached_property
-	def ACC(self) -> float:
-		return sklearn.metrics.accuracy_score( self.y, self.yhat > self.THRESHOLD )
-
-	@cached_property
-	def F1(self) -> float:
-		return sklearn.metrics.f1_score( self.y, self.yhat > self.THRESHOLD )
+USE_CUDA = torch.cuda.is_available()
+device = 'cuda' if USE_CUDA else 'cpu'
 
 
 @dataclass
 class ModelOutputsNode:
-	truth: pd.Series = None
-	loss : pd.Series = None
-	logit: pd.Series = None
-	pred : pd.Series = None
+	truth: Union[np.ndarray, pd.Series] = None
+	loss : Union[np.ndarray, pd.Series] = None
+	logit: Union[np.ndarray, pd.Series] = None
+	pred : Union[np.ndarray, pd.Series] = None
+
+	def to_numpy(self) -> 'ModelOutputsNode':
+		for key in ['truth', 'loss', 'logit', 'pred']:
+			value = getattr(self, key)
+			if isinstance(value, pd.Series):
+				setattr(self, key, value.to_numpy())
+		return self
+
+	def to_series(self, classes: list[str]) -> 'ModelOutputsNode':
+		for key in ['truth', 'loss', 'logit', 'pred']:
+			value = getattr(self, key)
+			if isinstance(value, np.ndarray):
+				setattr(self, key, pd.Series(value, index=classes))
+		return self
 
 @dataclass
 class ModelOutputs:
@@ -228,117 +103,12 @@ class ModelOutputs:
 		self.pred[node]  = value.pred
 
 
-Array_Series_DataFrame: TypeAlias = Union[np.ndarray, pd.Series, pd.DataFrame]
 @dataclass
-class Metrics:
-	ACC      : Union[pd.Series, float] = field( default = None )
-	AUC      : Union[pd.Series, float] = field( default = None )
-	F1       : Union[pd.Series, float] = field( default = None )
-	THRESHOLD: Union[pd.Series, float] = field( default = None )
-
-	def save(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'Metrics':
-
-		def get_formatted(metric):
-			return metric if isinstance(metric, pd.Series) else pd.Series([metric])
-
-		output_path = config.output.path / f'{experiment_stage}/metrics.xlsx'
-		output_path.parent.mkdir(parents=True, exist_ok=True)
-
-		with pd.ExcelWriter( output_path ) as writer:
-			get_formatted(self.ACC).to_excel( writer, sheet_name = 'acc' )
-			get_formatted(self.AUC).to_excel( writer, sheet_name = 'auc' )
-			get_formatted(self.F1).to_excel(  writer, sheet_name = 'f1' )
-			get_formatted(self.THRESHOLD).to_excel( writer, sheet_name = 'threshold' )
-		return self
-
-
-	def load(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'Metrics':
-
-		def set_formatted(metric):
-			if isinstance(metric, pd.Series) and len(metric) == 1:
-				return metric.iloc[0]
-			return metric
-
-		input_path = config.output.path / f'{experiment_stage}/metrics.xlsx'
-
-		if input_path.is_file():
-			self.ACC = set_formatted(pd.read_excel(input_path, sheet_name = 'acc', index_col = 0, squeeze = True))
-			self.AUC = set_formatted(pd.read_excel(input_path, sheet_name = 'auc', index_col = 0, squeeze = True))
-			self.F1  = set_formatted(pd.read_excel(input_path, sheet_name = 'f1' , index_col = 0, squeeze = True))
-			self.THRESHOLD = set_formatted(pd.read_excel(input_path, sheet_name = 'threshold', index_col = 0, squeeze = True))
-		return self
-
-
-	@classmethod
-	def calculate(cls, config: Settings, REMOVE_NULL: bool=True, **kwargs) -> 'Metrics':
-		# sourcery skip: raise-specific-error
-		try:
-			y    = kwargs['model_outputs'].truth if 'model_outputs' in kwargs else kwargs['y']
-			yhat = kwargs['model_outputs'].pred  if 'model_outputs' in kwargs else kwargs['yhat']
-
-		except KeyError as e:
-			" The KeyError would occur if the else clauses are reached and kwargs does not contain the keys 'y' or 'yhat'."
-			raise KeyError(f"Key {e} not found in kwargs") from e
-
-		except AttributeError as e:
-			"The AttributeErrorwould occur if the model_outputs object does not have the attributes truth or pred."
-			raise AttributeError(f"Attribute {e} not found in kwargs") from e
-
-		except TypeError as e:
-			" A TypeError would occur if you attempt an operation on a variable that is of an inappropriate type. In this case, if model_outputs is a basic data type like an integer, string, etc., that does not support attribute access."
-			raise TypeError(f"TypeError: {e}") from e
-
-		except Exception as e:
-			raise Exception(f"Exception: {e}") from e
-
-
-		return cls._calculate( y=y, yhat=yhat, config=config, REMOVE_NULL=REMOVE_NULL )
-
-
-	@classmethod
-	def _calculate(cls, y: Array_Series_DataFrame, yhat: Array_Series_DataFrame, config: Settings, REMOVE_NULL: bool = True) -> 'Metrics':
-
-		thresh_technique = config.hyperparameter_tuning.thresh_technique
-
-		if isinstance( y, pd.Series ):
-			y, yhat = y.to_numpy(), yhat.to_numpy()
-
-		if isinstance( y, np.ndarray ):
-			return cls()._calculate_1D_data( y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL,
-											 thresh_technique=thresh_technique )
-
-		elif isinstance( y, pd.DataFrame ):
-			metrics = cls()
-			metrics.THRESHOLD = pd.Series( index=y.columns )
-			metrics.AUC = pd.Series( index=y.columns )
-			metrics.ACC = pd.Series( index=y.columns )
-			metrics.F1 = pd.Series( index=y.columns )
-
-			for clm in y.columns:
-				mts = cls()._calculate_1D_data( y=y[clm], yhat=yhat[clm], REMOVE_NULL=REMOVE_NULL,
-												thresh_technique=thresh_technique )
-
-				metrics.THRESHOLD[clm] = mts.THRESHOLD
-				metrics.AUC[clm] = mts.AUC
-				metrics.ACC[clm] = mts.ACC
-				metrics.F1[clm] = mts.F1
-
-			return metrics
-
-		raise NotImplementedError( f"Metrics not implemented for type {type( y )}" )
-
-
-	def _calculate_1D_data(self, y: np.ndarray, yhat: np.ndarray, REMOVE_NULL: bool = True, thresh_technique: ThreshTechList = ThreshTechList.ROC) -> 'Metrics':
-
-		calculateMetrics = CalculateMetrics( y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL,
-											 thresh_technique=thresh_technique )
-
-		self.THRESHOLD = calculateMetrics.THRESHOLD
-		self.AUC       = calculateMetrics.AUC
-		self.ACC       = calculateMetrics.ACC
-		self.F1        = calculateMetrics.F1
-		return self
-
+class FindingsNode:
+	config: Settings
+	node: Node
+	hyper_parameters_node: 'HyperPrametersNode' = None
+	model_outputs_node: 'ModelOutputsNode' = None
 
 
 @dataclass
@@ -352,85 +122,10 @@ class Findings:
 	hyper_parameters: 'HyperParameters' = field( default = None )
 	experiment_stage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
 
-
-@dataclass
-class HyperPrametersNode:
-	MULTIPLIER: float = 1.0
-	ADDITIVE  : float = 0.0
+	def __getitem__(self, item):
+		return getattr( self, item )
 
 
-# TODO: working on this class
-@dataclass
-class HyperParameters:
-	MULTIPLIER: pd.Series = field(default_factory = pd.Series)
-	ADDITIVE  : pd.Series = field(default_factory = pd.Series)
-
-	@classmethod
-	def initialize(cls, config: Settings=None, classes: Any=None) -> 'HyperParameters':
-
-		logit = config.technique.technique_name == TechniqueNames.LOGIT
-		ADDITIVE   = pd.Series( 0.0, index=classes)
-		MULTIPLIER = pd.Series( 0.0 if logit else 1.0, index=classes)
-
-		return cls(MULTIPLIER=MULTIPLIER, ADDITIVE=ADDITIVE)
-
-	def calculate_for_node(self, model_outputs: ModelOutputs, config: Settings, node: str) -> list[float]:
-
-		search_space_multiplier = config.hyperparameter_tuning.search_space_multiplier
-		search_space_additive   = config.hyperparameter_tuning.search_space_additive
-
-		truth = model_outputs.truth[node]
-		pred  = model_outputs.pred[node]
-
-		truth, pred = remove_null_samples( y=truth, yhat=pred, RAISE_ValueError_IF_EMPTY=True )
-
-		def objective_function(args: dict[str, float]) -> float:
-
-			self.MULTIPLIER[node], self.ADDITIVE[node] = args['MULTIPLIER'], args['ADDITIVE']
-
-			# Updating the hyper_parameters for the current node and thresholding technique
-
-			data2: Data = CalculateNewFindings.calculate_per_node( node=node, data=data, config=config, hyper_parameters=hp_in, thresh_technique=thresh_technique)
-
-			# Returning the error
-			return 1 - data2.NEW.metrics[thresh_technique, node][config.optimization_metric.upper()]
-
-		# Run the optimization
-		best = fmin(
-				fn        = lambda args : objective_function( args=args, hp_in=hyper_parameters),
-				space     = dict( MULTIPLIER = hp.uniform('MULTIPLIER', *search_space_multiplier),
-								  ADDITIVE   = hp.uniform('ADDITIVE'  , *search_space_additive)),
-				algo      = tpe.suggest ,     # Optimization algorithm (Tree-structured Parzen Estimator)
-				max_evals = config.max_evals , # Maximum number of evaluations
-				verbose   = True ,	          # Verbosity level (2 for detailed information)
-				)
-
-		return [ best['a'] , best['b'] ]
-
-	@classmethod
-	def calculate(cls, findings_original: Findings) -> 'HyperParameters':
-
-		config        = findings_original.config
-		model_outputs = findings_original.model_outputs
-		classes       = findings_original.data.nodes.classes
-
-		# Initializing the hyperparameters
-		HP = cls.initialize( config=config, classes=classes )
-
-		CNF = CalculateNewFindings( findings_original=findings_original, hyper_parameters=HP)
-
-		for node in classes:
-			HP.MULTIPLIER[node], HP.ADDITIVE[node] = HP.calculate_for_node( model_outputs=model_outputs, config=config, node=node)
-
-
-		return HP
-
-	def __getitem__(self, node) -> HyperPrametersNode:
-		return HyperPrametersNode( MULTIPLIER=self.MULTIPLIER[node], ADDITIVE=self.ADDITIVE[node] )
-
-	def __setitem__(self, node, value: HyperPrametersNode):
-		assert isinstance( value, HyperPrametersNode ), "Value must be of type HyperPrametersNode"
-		self.MULTIPLIER[node], self.ADDITIVE[node] = value.MULTIPLIER, value.ADDITIVE
 
 @dataclass
 class FindingsTrainTest:
@@ -557,11 +252,332 @@ class FindingsAllTechniques:
 
 		# Save the plot
 		if save_figure:
-			file_path = self.config.output.path / f'figures/roc_curve_all_datasets/{self.config.hyperparameter_tuning.thresh_technique}/roc_curve_all_datasets.png'
+			file_path = self.config.output.path / f'figures/roc_curve_all_datasets/{self.config.hyperparameter_tuning.threshold_technique}/roc_curve_all_datasets.png'
 			LoadSaveFile( file_path ).save( data=fig )
 
 
 
+'''
+class TaxonomyXRV:
+
+	def __init__(self, config: Settings, seed: int=10):
+
+		self.hyper_parameters = None
+		self.config         : Settings                  = config
+		self.train          : Optional[Data]                      = None
+		self.test           : Optional[Data]                      = None
+		self.model          : Optional[torch.nn.Module]           = None
+		self.dataset         : Optional[xrv.datasets.CheX_Dataset] = None
+
+		technique_name = config.technique_name or EvaluationMetricNames.LOSS
+		self.save_path : str = f'details/{config.DEFAULT_FINDING_FOLDER_NAME}/{technique_name}'
+
+		# Setting the seed
+		self.setting_random_seeds_for_pytorch(seed=seed)
+
+	@staticmethod
+	def measuring_bce_loss(p, y):
+		return -( y * np.log(p) + (1 - y) * np.log(1 - p) )
+
+	@staticmethod
+	def equations_sigmoidprime(p):
+		""" Refer to Eq. (10) in the paper draft """
+		return p*(1-p)
+
+	@staticmethod
+	def setting_random_seeds_for_pytorch(seed=10):
+		np.random.seed(seed)
+		torch.manual_seed(seed)
+		if USE_CUDA:
+			torch.cuda.manual_seed_all(seed)
+			torch.backends.cudnn.deterministic = True
+			torch.backends.cudnn.benchmark     = False
+
+	def threshold(self, data_mode = DataModes.TRAIN):
+
+		data = self.train if data_mode == DataModes.TRAIN else self.test
+
+		exp_stage_list   = [ExperimentStageNames.ORIGINAL.name       , ExperimentStageNames.NEW.name]
+		thresh_tech_list = [ThreshTechList.PRECISION_RECALL.name, ThreshTechList.ROC.name]
+
+		df = pd.DataFrame(  index   = data.ORIGINAL.threshold.index ,
+							columns = pd.MultiIndex.from_product([thresh_tech_list, exp_stage_list]) )
+
+		for th_tqn in [ThreshTechList.ROC.value , ThreshTechList.PRECISION_RECALL.value]:
+			df[ (th_tqn, ExperimentStageNames.ORIGINAL.name)] = data.ORIGINAL.threshold[th_tqn]
+			df[ (th_tqn, ExperimentStageNames.NEW.name)] = data.NEW     .threshold[th_tqn]
+
+		return df.replace(np.nan, '')
+
+	@staticmethod
+	def accuracy_per_node(data, node, experimentStage, threshold_technique) -> float:
+
+		findings = getattr(data,experimentStage)
+
+		if node in data.labels.nodes.non_null:
+			thresh = findings.threshold[threshold_technique][node]
+			pred   = (findings.pred [node] >= thresh)
+			truth  = (findings.truth[node] >= 0.5 )
+			return (pred == truth).mean()
+
+		return np.nan
+
+	def accuracy(self, data_mode=DataModes.TRAIN) -> pd.DataFrame:
+
+		data 	    = getattr(self, data_mode.value)
+		pathologies = self.model.pathologies
+		columns 	= pd.MultiIndex.from_product([ThreshTechList, data.list_findings_names])
+		df 			= pd.DataFrame(index=pathologies , columns=columns)
+
+		for node in pathologies:
+			for xf in columns:
+				df.loc[node, xf] = TaxonomyXRV.accuracy_per_node(data=data, node=node, threshold_technique=xf[0], experimentStage=xf[1])
+
+		return df.replace(np.nan, '')
+
+	def findings_per_node(self, node, data_mode=DataModes.TRAIN):
+
+		data = self.train if data_mode == DataModes.TRAIN else self.test
+
+		# Getting the hierarchy_penalty for node
+		hierarchy_penalty = pd.DataFrame(columns=ThreshTechList.members())
+		for x in ThreshTechList:
+			hierarchy_penalty[x] = data.hierarchy_penalty[x,node]
+
+		# Getting Metrics for node
+		metrics = pd.DataFrame()
+		for m in EvaluationMetricNames.members():
+			metrics[m] = self.get_metric(metric=m, data_mode=data_mode).T[node]
+
+		return Hierarchy.OUTPUT(hierarchy_penalty=hierarchy_penalty, metrics=metrics, data=data)
+
+	def findings_per_node_iterator(self, data_mode=DataModes.TRAIN):
+
+		data = self.train if data_mode == DataModes.TRAIN else self.test
+
+		return iter( [ self.findings_per_node(node)  for node in data.Hierarchy_cls.parent_dict.keys() ] )
+
+	def findings_per_node_with_respect_to_their_parent(self, node, thresh_technic: ThreshTechList = ThreshTechList.ROC, data_mode=DataModes.TRAIN):
+
+		data = self.train if data_mode == DataModes.TRAIN else self.test
+
+		N = data.Hierarchy_cls.graph.nodes
+		parent_child = data.Hierarchy_cls.parent_dict[node] + [node]
+
+		df = pd.DataFrame(index=N[node][ ExperimentStageNames.ORIGINAL]['data'].index, columns=pd.MultiIndex.from_product([parent_child, ['truth' , 'pred' , 'loss'], ExperimentStageNames.members()]))
+
+		for n in parent_child:
+			for dtype in ['truth' , 'pred' , 'loss']:
+				df[ (n, dtype, ExperimentStageNames.ORIGINAL)] = N[n][ ExperimentStageNames.ORIGINAL]['data'][dtype].values
+				df[ (n , dtype, ExperimentStageNames.NEW)]     = N[n][ ExperimentStageNames.NEW]['data'][thresh_technic][dtype].values
+
+			df[(n, 'hierarchy_penalty', ExperimentStageNames.NEW)] = N[n]['hierarchy_penalty'][thresh_technic].values
+
+		return df.round(decimals=3).replace(np.nan, '', regex=True)
+
+
+	def save_metrics(self):
+
+		for metric in EvaluationMetricNames.members() + ['Threshold']:
+
+			# Saving the data
+			path = self.config.PATH_LOCAL.joinpath( f'{self.save_path}/{metric}.xlsx' )
+
+			# Create a new Excel writer
+			with pd.ExcelWriter(path, engine='openpyxl') as writer:
+
+				# Loop through the data modes
+				for data_mode in DataModes:
+					self.get_metric(metric=metric, data_mode=data_mode).to_excel(writer, sheet_name=data_mode.value)
+
+			# Save the Excel file
+			# writer.save()
+
+	def get_metric(self, metric: EvaluationMetricNames=EvaluationMetricNames.AUC, data_mode: DataModes=DataModes.TRAIN) -> pd.DataFrame:
+
+		data: Data = self.train if data_mode == DataModes.TRAIN else self.test
+
+		column_names = data.labels.nodes.impacted
+
+		columns = pd.MultiIndex.from_product([ThreshTechList, ExperimentStageNames.members()], names=['threshold_technique', 'WR'])
+		df = pd.DataFrame(index=data.ORIGINAL.pathologies, columns=columns)
+
+		for x in ThreshTechList:
+			if hasattr(data.ORIGINAL, 'metrics'):
+				df[x, ExperimentStageNames.ORIGINAL] = data.ORIGINAL.metrics[x].T[metric.name]
+			if hasattr(data.NEW, 'metrics'):
+				df[x, ExperimentStageNames.NEW] = data.NEW     .metrics[x].T[metric.name]
+
+		df = df.apply(pd.to_numeric, errors='ignore').round(3).replace(np.nan, '')
+
+		return df.T[column_names].T
+
+	@staticmethod
+	def get_data_and_model(config):
+
+		# Load the model
+		model = LoadModelXRV(config).load().model
+
+		# Load the data
+		LD = LoadChestXrayDatasets.load( config=config )
+		LD.load()
+
+		return LD.train, LD.test, model, LD.dataset_full
+
+	@classmethod
+	def run_full_experiment(cls, technique_name=TechniqueNames.LOSS, seed=10, **kwargs):
+
+		# Getting the user arguments
+		config = get_settings( jupyter=True, **kwargs )
+
+		# Initializing the class
+		FE = cls(config=config, seed=seed)
+
+		# Loading train/test data as well as the pre-trained model
+		FE.train, FE.test, FE.model, FE.dataset = cls.get_data_and_model(FE.config)
+
+		param_dict = {key: getattr(FE, key) for key in ['model', 'config']}
+
+		# Measuring the ORIGINAL metrics (predictions and losses, thresholds, aucs, etc.)
+		FE.train = CalculateOriginalFindings.get_updated_data(data=FE.train, **param_dict)
+		FE.test  = CalculateOriginalFindings.get_updated_data(data=FE.test , **param_dict)
+
+		# Calculating the hyper_parameters
+		FE.hyper_parameters = HyperParameterTuning.get_updated_data(data=FE.train, **param_dict)
+
+		# Adding the new findings to the graph nodes
+		FE.train.Hierarchy_cls.update_graph(hyper_parameters=FE.hyper_parameters)
+		FE.test. Hierarchy_cls.update_graph(hyper_parameters=FE.hyper_parameters)
+
+		# Measuring the updated metrics (predictions and losses, thresholds, aucs, etc.)
+		param_dict = {key: getattr(FE, key) for key in ['model', 'config', 'hyper_parameters']}
+		FE.train = CalculateNewFindings.get_updated_data(data=FE.train, technique_name=technique_name, **param_dict)
+		FE.test  = CalculateNewFindings.get_updated_data(data=FE.test , technique_name=technique_name, **param_dict)
+
+		# Saving the metrics: AUC, threshold, accuracy
+		FE.save_metrics()
+
+		return FE
+
+	@staticmethod
+	def loop_run_full_experiment():
+		for datasetName in DatasetNames.members():
+			for technique_name in TechniqueNames:
+				TaxonomyXRV.run_full_experiment(technique_name=technique_name, datasetName=datasetName)
+
+	@classmethod
+	def get_merged_data(cls, data_mode=DataModes.TEST, technique_name='logit', threshold_technique='DEFAULT', datasets_list=None):  # type: (str, str, str, list) -> Tuple[DataMerged, DataMerged]
+
+		if datasets_list is None:
+			datasets_list = DatasetNames
+
+		def get(method: ExperimentStageNames) -> DataMerged:
+			data = defaultdict(list)
+			for datasetName in datasets_list:
+				a1 = cls.run_full_experiment(technique_name=technique_name, datasetName=datasetName)
+
+				metric = getattr( getattr(a1,data_mode),method.value)
+				data['pred'].append(metric.pred[threshold_technique] if method == ExperimentStageNames.NEW else metric.pred)
+				data['truth'].append(metric.truth)
+				data['yhat'].append(data['pred'][-1] >= metric.metrics[threshold_technique].T['Threshold'].T )
+				data['list_nodes_impacted'].append(getattr(a1, data_mode).labels.nodes.impacted)
+
+			return DataMerged(data)
+
+		baseline = get(ExperimentStageNames.ORIGINAL)
+		proposed = get(ExperimentStageNames.NEW)
+
+		return baseline, proposed
+
+	@classmethod
+	def get_all_metrics(cls, datasets_list=DatasetNames.members(), data_mode=DataModes.TEST, threshold_technique=ThreshTechList.DEFAULT, jupyter=True, **kwargs):  # type: (List[DatasetNames], DataModes, ThreshTechList, bool, dict) -> MetricsAllTechniques
+
+		config = get_settings(jupyter=jupyter, **kwargs)
+		save_path = pathlib.Path(f'tables/metrics_all_datasets/{threshold_technique}')
+
+		def apply_to_approach(technique_name: TechniqueNames) -> Metrics:
+
+			baseline, proposed = cls.get_merged_data(data_mode=data_mode, technique_name=technique_name, threshold_technique=threshold_technique, datasets_list=datasets_list)
+
+			def get_auc_acc_f1(node: str, data: DataMerged):
+
+				# Finding the indices where the truth is not nan
+				non_null = ~np.isnan( data.truth[node] )
+				truth_notnull = data.truth[node][non_null].to_numpy()
+
+				if (len(truth_notnull) > 0) and (np.unique(truth_notnull).size == 2):
+					data.auc_acc_f1[node][EvaluationMetricNames.AUC.name] = sklearn.metrics.roc_auc_score(data.truth[node][non_null], data.yhat[node][non_null])
+					data.auc_acc_f1[node][EvaluationMetricNames.ACC.name] = sklearn.metrics.accuracy_score(data.truth[node][non_null], data.yhat[node][non_null])
+					data.auc_acc_f1[node][EvaluationMetricNames.F1.name]  = sklearn.metrics.f1_score(data.truth[node][non_null], data.yhat[node][non_null])
+
+			def get_p_value_kappa_cohen_d_bf10(df, node):  # type: (pd.DataFrame, str) -> None
+
+				# Perform the independent samples t-test
+				df.loc['t_stat',node], df.loc['p_value',node] = stats.ttest_ind( baseline.yhat[node], proposed.yhat[node])
+
+				# kappa inter rater metric
+				df.loc['kappa',node] = sklearn.metrics.cohen_kappa_score(baseline.yhat[node], proposed.yhat[node])
+
+				df_ttest = pg.ttest(baseline.yhat[node], proposed.yhat[node])
+				df.loc['power',node]   = df_ttest['power'].values[0]
+				df.loc['cohen-d',node] = df_ttest['cohen-d'].values[0]
+				df.loc['BF10',node]    = df_ttest['BF10'].values[0]
+
+			metrics_comparison = pd.DataFrame(columns=baseline.pred.columns, index=['kappa', 'p_value', 't_stat', 'power', 'cohen-d','BF10'])
+			# auc_acc_f1_baseline = pd.DataFrame (columns=baseline.pred.columns, index=EvaluationMetricNames.members())
+			# auc_acc_f1_proposed = pd.DataFrame (columns=baseline.pred.columns, index=EvaluationMetricNames.members())
+
+			for node in baseline.pred.columns:
+				get_auc_acc_f1(node, baseline)
+				get_auc_acc_f1(node, proposed)
+				get_p_value_kappa_cohen_d_bf10(metrics_comparison, node)
+
+			return Metrics(metrics_comparison=metrics_comparison, baseline=baseline, proposed=proposed, config=config, technique_name=technique_name)
+
+		def get_auc_acc_f1_merged(logit, loss):  # type: (Metrics, Metrics) -> pd.DataFrame
+			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), TechniqueNames.members()])
+			auc_acc_f1 = pd.DataFrame(columns=columns)
+
+			for metric in EvaluationMetricNames.members():
+				auc_acc_f1[metric] = pd.DataFrame( dict(baseline=loss.baseline.auc_acc_f1.T[metric],
+														loss=loss.proposed.auc_acc_f1.T[metric],
+														logit=logit.proposed.auc_acc_f1.T[metric] ))
+
+			return auc_acc_f1
+
+		if config.do_metrics == 'calculate':
+			logit 	   = apply_to_approach(TechniqueNames.LOGIT)
+			loss  	   = apply_to_approach(TechniqueNames.LOSS)
+			auc_acc_f1 = get_auc_acc_f1_merged(logit, loss)
+
+			# Saving the metrics locally
+			LoadSaveFindings(config, save_path / 'logit_metrics.csv').save(logit.metrics_comparison[logit.baseline.list_nodes_impacted].T)
+			LoadSaveFindings(config, save_path / 'logit.pkl').save(logit)
+
+			LoadSaveFindings(config, save_path / 'loss_metrics.csv').save(loss.metrics_comparison[loss.baseline.list_nodes_impacted].T)
+			LoadSaveFindings(config, save_path / 'loss.pkl').save(loss)
+
+			LoadSaveFindings(config, save_path / 'auc_acc_f1.xlsx').save(auc_acc_f1, index=True)
+
+		else:
+			load_lambda = lambda x, **kwargs: LoadSaveFindings(config, save_path.joinpath(x)).load(
+					**kwargs)
+			logit 	   = load_lambda('logit.pkl')
+			loss 	   = load_lambda('loss.pkl')
+			auc_acc_f1 = load_lambda('auc_acc_f1.xlsx', index_col=0, header=[0, 1])
+
+		return MetricsAllTechniques(loss=loss, logit=logit, auc_acc_f1=auc_acc_f1, threshold_technique=threshold_technique, datasets_list=datasets_list, data_mode=data_mode)
+
+	@classmethod
+	def get_all_metrics_all_thresh_techniques(cls, datasets_list: list[str]=['CheX', 'NIH', 'PC'], data_mode: str=DataModes.TEST) -> MetricsAllTechniqueThresholds:
+
+		output = {}
+		for x in tqdm(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
+			output[x] = TaxonomyXRV.get_all_metrics(datasets_list=datasets_list, data_mode=data_mode, threshold_technique=x)
+
+		return MetricsAllTechniqueThresholds(**output)
+
+'''
 
 '''
 class Tables:
@@ -569,12 +585,12 @@ class Tables:
 	def __init__(self, jupyter=True, **kwargs):
 		self.config = get_settings(jupyter=jupyter, **kwargs)
 
-	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode=DataModes.TEST.value, thresh_technique='DEFAULT'):
+	def get_metrics_per_thresh_techniques(self, save_table=True, data_mode=DataModes.TEST.value, threshold_technique='DEFAULT'):
 
 		from taxonomy.utilities.utils import TaxonomyXRV
 
 		save_path = self.config.PATH_LOCAL.joinpath(
-			f'tables/metrics_per_dataset/{thresh_technique}/metrics_{data_mode}.xlsx')
+			f'tables/metrics_per_dataset/{threshold_technique}/metrics_{data_mode}.xlsx')
 
 		def save(metricsa):
 
@@ -599,18 +615,18 @@ class Tables:
 
 			for dt in DatasetNames.members():
 				df = TaxonomyXRV.run_full_experiment(technique_name=TechniqueNames.LOGIT, datasetName=dt)
-				AUC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
-				F1[ (dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
-				ACC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
+				AUC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[threshold_technique].loc[ EvaluationMetricNames.AUC.name]
+				F1[ (dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[threshold_technique].loc[ EvaluationMetricNames.F1.name]
+				ACC[(dt, LOGIT)] = getattr(df, data_mode).NEW.metrics[threshold_technique].loc[ EvaluationMetricNames.ACC.name]
 
-				AUC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
-				F1[ (dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.F1.name]
-				ACC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
+				AUC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[threshold_technique].loc[ EvaluationMetricNames.AUC.name]
+				F1[ (dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[threshold_technique].loc[ EvaluationMetricNames.F1.name]
+				ACC[(dt, BASELINE)] = getattr(df, data_mode).ORIGINAL.metrics[threshold_technique].loc[ EvaluationMetricNames.ACC.name]
 
 				df = TaxonomyXRV.run_full_experiment(technique_name=TechniqueNames.LOSS, datasetName=dt)
-				AUC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.AUC.name]
-				F1[ (dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[EvaluationMetricNames.F1.name]
-				ACC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[thresh_technique].loc[ EvaluationMetricNames.ACC.name]
+				AUC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[threshold_technique].loc[ EvaluationMetricNames.AUC.name]
+				F1[ (dt, LOSS)] = getattr(df, data_mode).NEW.metrics[threshold_technique].loc[EvaluationMetricNames.F1.name]
+				ACC[(dt, LOSS)] = getattr(df, data_mode).NEW.metrics[threshold_technique].loc[ EvaluationMetricNames.ACC.name]
 
 			AUC = AUC.apply(pd.to_numeric).round(3).replace(np.nan, '')
 			F1  = F1.apply( pd.to_numeric).round(3).replace(np.nan, '')
@@ -753,16 +769,16 @@ class Visualize:
 
 			columns = pd.MultiIndex.from_product([EvaluationMetricNames.members(), TechniqueNames.members()])
 			metric_df = {}
-			for thresh_technique in ThreshTechList:
+			for threshold_technique in ThreshTechList:
 				output = TaxonomyXRV.get_all_metrics(datasets_list=DatasetNames.members(),
 				                                     data_mode=DataModes.TEST,
-				                                     thresh_technique=thresh_technique)
-				metric_df[thresh_technique] = pd.DataFrame(columns=columns)
+				                                     threshold_technique=threshold_technique)
+				metric_df[threshold_technique] = pd.DataFrame(columns=columns)
 				for metric in EvaluationMetricNames.members():
 					df = pd.DataFrame(dict(baseline=output.loss.baseline.auc_acc_f1.T[metric],
 					                       loss=output.loss.proposed.auc_acc_f1.T[metric],
 					                       logit=output.logit.proposed.auc_acc_f1.T[metric]))
-					metric_df[thresh_technique][metric] = df.T[output.list_nodes_impacted].T
+					metric_df[threshold_technique][metric] = df.T[output.list_nodes_impacted].T
 
 			return metric_df
 
@@ -772,16 +788,16 @@ class Visualize:
 					  rc=None)
 
 		params = dict(legend=False, fontsize=16, kind='barh')
-		for i, thresh_technique in enumerate(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
-			metric_df[thresh_technique][EvaluationMetricNames.ACC.name].plot(ax=axes[i, 0],
+		for i, threshold_technique in enumerate(['DEFAULT', 'ROC', 'PRECISION_RECALL']):
+			metric_df[threshold_technique][EvaluationMetricNames.ACC.name].plot(ax=axes[i, 0],
 																			 xlabel=EvaluationMetricNames.ACC.name,
-																			 ylabel=thresh_technique, **params)
-			metric_df[thresh_technique][EvaluationMetricNames.AUC.name].plot(ax=axes[i, 1],
+																			 ylabel=threshold_technique, **params)
+			metric_df[threshold_technique][EvaluationMetricNames.AUC.name].plot(ax=axes[i, 1],
 																			 xlabel=EvaluationMetricNames.AUC.name,
-																			 ylabel=thresh_technique, **params)
-			metric_df[thresh_technique][EvaluationMetricNames.F1.name].plot(ax=axes[i, 2],
+																			 ylabel=threshold_technique, **params)
+			metric_df[threshold_technique][EvaluationMetricNames.F1.name].plot(ax=axes[i, 2],
 																			xlabel=EvaluationMetricNames.F1.name,
-																			ylabel=thresh_technique, **params)
+																			ylabel=threshold_technique, **params)
 
 		plt.legend(loc='lower right', fontsize=16)
 		plt.tight_layout()
@@ -792,11 +808,11 @@ class Visualize:
 
 
 	@staticmethod
-	def plot_metrics(config: Settings, metrics: pd.DataFrame, thresh_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
+	def plot_metrics(config: Settings, metrics: pd.DataFrame, threshold_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
 
 
 		def save_plot():
-			save_path = config.PATH_LOCAL.joinpath(f'figures/auc_acc_f1_all_datasets/{thresh_technique}/')
+			save_path = config.PATH_LOCAL.joinpath(f'figures/auc_acc_f1_all_datasets/{threshold_technique}/')
 			save_path.mkdir(parents=True, exist_ok=True)
 			for ft in ['png', 'eps', 'svg', 'pdf']:
 				plt.savefig( save_path.joinpath( f'metrics_AUC_ACC_F1.{ft}' ), format=ft, dpi=300 )

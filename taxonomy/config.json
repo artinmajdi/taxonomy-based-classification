@@ -7,7 +7,9 @@
     "datasetInfoList"  : [],
     "not_null_samples" : true,
     "max_samples"      : 1000,
-    "train_test_ratio" : 0.7
+    "train_test_ratio" : 0.7,
+    "default_taxonomy" : {"Lung Opacity": ["Pneumonia", "Atelectasis", "Consolidation", "Lung Lesion", "Edema", "Infiltration"],
+                          "Enlarged Cardiomediastinum": ["Cardiomegaly"]}
   },
   "training": {
     "batch_size"        : 1000,
@@ -35,7 +37,7 @@
     "technique_name"                       : "loss_based",
     "metric_used_to_select_best_parameters": "auc",
     "parent_metric_to_use"                 : "ground_truth",
-    "thresh_technique"                     : "ROC"
+    "threshold_technique"                     : "ROC"
   },
   "hyperparameter_tuning": {
     "max_evals"                            : 20,

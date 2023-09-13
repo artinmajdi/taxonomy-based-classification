@@ -3,15 +3,13 @@ import json
 import pathlib
 import sys
 from dataclasses import dataclass, field, InitVar
-from typing import Any, Optional, TypeAlias, Union
+from typing import Any, TypeAlias, Union
 
-from pydantic import BaseModel, conint, confloat, Field, FieldValidationInfo
+from pydantic import BaseModel, confloat, conint, Field, FieldValidationInfo
 from pydantic.functional_validators import field_validator
 
 from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, LossFunctionOptions, \
-	ModelWeightNames, \
-	ParentMetricToUseNames, SimulationOptions, TechniqueNames, ThreshTechList
-
+	ModelWeightNames, ParentMetricToUseNames, SimulationOptions, TechniqueNames, ThreshTechList
 
 PathNoneType: TypeAlias = Union[pathlib.Path, None]
 
@@ -66,14 +64,15 @@ class DatasetInfo:
 		return meta_data_dict.get(self.datasetName.value)
 
 class DatasetSettings(BaseModel):
-	data_mode        : DataModes = DataModes.TRAIN
-	views            : list[str] = Field(default_factory = lambda: ['PA', 'AP'])
-	path_all_datasets: pathlib.Path = pathlib.Path('./datasets')
+	data_mode        : DataModes          = DataModes.TRAIN
+	views            : list[str]          = Field(default_factory = lambda: ['PA', 'AP'])
+	path_all_datasets: pathlib.Path       = pathlib.Path('./datasets')
 	datasetNames     : list[DatasetNames] = Field(default_factory = lambda: [DatasetNames.PC, DatasetNames.NIH, DatasetNames.CHEXPERT])
-	datasetInfoList  : list[DatasetInfo] = Field(default = None)
-	non_null_samples : bool = True
-	max_samples      : conint(gt=0) = 1000
+	datasetInfoList  : list[DatasetInfo]   = Field(default = None)
+	non_null_samples : bool                = True
+	max_samples      : conint(gt=0)        = 1000
 	train_test_ratio : confloat(ge=0,le=1) = 0.7
+	default_taxonomy : dict[str, set[str]]
 
 	@field_validator('path_all_datasets', mode='after')
 	def make_path_absolute(cls, v: pathlib.Path):
@@ -86,6 +85,7 @@ class DatasetSettings(BaseModel):
 								views 			  = info.data['views'],
 								datasetName       = dt )
 				 for dt in info.data['datasetNames']]
+
 
 class TrainingSettings(BaseModel):
 	criterion	      : LossFunctionOptions = LossFunctionOptions.BCE
@@ -117,7 +117,7 @@ class TechniqueSettings(BaseModel):
 	technique_name                       : TechniqueNames = TechniqueNames.LOGIT
 	metric_used_to_select_best_parameters: EvaluationMetricNames = EvaluationMetricNames.AUC
 	parent_metric_to_use                 : ParentMetricToUseNames = ParentMetricToUseNames.TRUTH
-	thresh_technique                     : ThreshTechList = ThreshTechList.ROC
+	threshold_technique                     : ThreshTechList = ThreshTechList.ROC
 
 class HyperParameterTuningSettings(BaseModel):
 	max_evals              : conint(gt = 0) = 20

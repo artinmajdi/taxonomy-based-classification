@@ -16,53 +16,27 @@ import torchxrayvision as xrv
 from matplotlib import pyplot as plt
 from torch.utils.data import DataLoader as torch_DataLoader
 
-from taxonomy.utilities.findings import Findings
-from taxonomy.utilities.params import DatasetNames, HyperparameterNames, ParentMetricToUseNames, TechniqueNames, \
-	ThreshTechList
+from taxonomy.utilities.params import DatasetNames, ThreshTechList
 from taxonomy.utilities.settings import DatasetInfo, Settings
 
 USE_CUDA = torch.cuda.is_available()
 
 
-
 @dataclass
-class Nodes:
-	labels               : InitVar[pd.DataFrame]
-	default_taxonomy_init: InitVar[dict]         = None
-	graph                : nx.DiGraph            = field(init = False)
-	classes              : set                   = field(init = False)
-	NON_NULL             : set                   = field(init = False)
-	IMPACTED             : set                   = field(init = False)
-	_default_taxonomy    : dict                  = field(init = False)
+class TaxonomyInfo:
+	labels: InitVar[pd.DataFrame]
+	config: InitVar[Settings]
+	graph            : nx.DiGraph = field(init = False)
+	classes          : set = field(init = False)
+	NON_NULL         : set = field(init = False)
+	IMPACTED         : set = field(init = False)
+	default_taxonomy : dict = field( init = False )
 
-	def __post_init__(self, labels: pd.DataFrame, default_taxonomy_init: dict = None):
-		"""
-		    Initialization method called automatically after object creation.
+	def __post_init__(self, labels: pd.DataFrame, config: Settings):
 
-		    :param labels: A dataframe containing labels for each node.
-		    :param default_taxonomy_init: (Optional) A dictionary representing the default taxonomy initialization.
-
-		    :return: None
-
-		    Attributes:
-		    - _default_taxonomy: A dictionary representing the default taxonomy.
-		    - classes: A set containing the column names from the labels dataframe.
-
-		"""
-		self._default_taxonomy: dict = default_taxonomy_init or {'Lung Opacity': {'Pneumonia', 'Atelectasis', 'Consolidation', 'Lung Lesion', 'Edema', 'Infiltration'}, 'Enlarged Cardiomediastinum': {'Cardiomegaly'}}
-
+		self.default_taxonomy = { key: set( values ) for key, values in config.dataset.default_taxonomy.items() }
 		self.classes = set(labels.columns.to_list())
-
-		self._update_other_parameters(labels)
-
-	@property
-	def default_taxonomy(self) -> dict[str, set[str]]:
-		return self._default_taxonomy
-
-	@default_taxonomy.setter
-	def default_taxonomy(self, value: dict):
-		self._default_taxonomy = value
-		self._update_other_parameters()
+		self._update(labels)
 
 	@property
 	def taxonomy(self):
@@ -91,33 +65,19 @@ class Nodes:
 	def node_thresh_tuple(self):
 		return list(itertools.product(self.IMPACTED, ThreshTechList.members()))
 
-	def _update_other_parameters(self, labels: pd.DataFrame = None):
+	def _update(self, labels: pd.DataFrame = None):
 
-		self.graph = self._construct_graph()
+		def _construct_graph() -> nx.DiGraph:
+			graph = nx.DiGraph( self.taxonomy )
+			graph.add_nodes_from( self.classes )
+			return graph
+
+		self.graph = _construct_graph()
 
 		if labels and labels.size > 0:
 			self.NON_NULL = set( labels.columns[labels.count() > 0].to_list() )
 
 		self.IMPACTED = self.NON_NULL.intersection( self.exist_in_taxonomy )
-
-	def _construct_graph(self) -> nx.DiGraph:
-		graph = nx.DiGraph( self.taxonomy )
-		graph.add_nodes_from( self.classes )
-		return graph
-
-
-	def add_hyperparameters_to_node(self, node: str, hyperparameter: Hyperparameter):
-		parent_node = self.get_parent_of( node )
-		self.graph.edges[parent_node, node] = hyperparameter
-
-	def get_hyperparameters_of_node(self, parent_node: str, child_node: str) -> dict[HyperparameterNames, float]:
-		return self.graph.edges[parent_node, child_node]
-
-	def add_hierarchy_penalty(self, node: str, penalty: float):
-		self.graph.nodes[node]['hierarchy_penalty'] = penalty
-
-	def get_hierarchy_penalty(self, node: str) -> float:
-		return self.graph.nodes[node].get('hierarchy_penalty', None)
 
 	def get_children_of(self, parent: str) -> set[str]:
 		return self.taxonomy.get( parent, set() )
@@ -125,90 +85,53 @@ class Nodes:
 	def get_parent_of(self, child: str) -> str | None:
 		return next( (parent for parent in self.taxonomy if child in self.taxonomy[parent]), None )
 
-	def show(self, package='networkx'):
 
-		import plotly.graph_objs as go
-		import seaborn as sns
+@dataclass
+class Node:
+	name: str
+	taxonomy_info: TaxonomyInfo
 
-		def plot_networkx_digraph(graph):
-			pos = nx.spring_layout(graph)
-			edge_x = []
-			edge_y = []
-			for edge in graph.edges():
-				x0, y0 = pos[edge[0]]
-				x1, y1 = pos[edge[1]]
-				edge_x.append(x0)
-				edge_x.append(x1)
-				edge_x.append(None)
-				edge_y.append(y0)
-				edge_y.append(y1)
-				edge_y.append(None)
+	def __str__(self):
+		return self.name
 
-			edge_trace = go.Scatter(x=edge_x, y=edge_y, line=dict(width=0.5, color='#888'), hoverinfo='none',
-									mode='lines')
+	@property
+	def impacted(self):
+		return self.name in self.taxonomy_info.IMPACTED
 
-			node_x = [pos[node][0] for node in graph.nodes()]
-			node_y = [pos[node][1] for node in graph.nodes()]
+	@property
+	def children(self):
+		return self.taxonomy_info.get_children_of(self.name)
 
-			colorbar = dict(thickness=15, title='Node Connections', xanchor='left', titleside='right')
-			marker = dict(showscale=True, colorscale='Viridis', reversescale=True, color=[], size=10, line_width=2,
-						  colorbar=colorbar)
+	@property
+	def parent(self):
+		return self.taxonomy_info.get_parent_of(self.name)
 
-			node_trace = go.Scatter(x=node_x, y=node_y, mode='markers', hoverinfo='text', marker=marker)
+	@property
+	def is_not_null(self):
+		return self.name in self.taxonomy_info.NON_NULL
 
-			node_adjacency = []
-			node_text = []
-			for node, adjacency in enumerate(graph.adjacency()):
-				node_adjacency.append(len(adjacency[1]))
-				node_text.append(f'{adjacency[0]} - # of connections: {len(adjacency[1])}')
-
-			node_trace.marker.color = node_adjacency
-			node_trace.text = node_text
-
-			# Add node labels
-			annotations_list = []
-			for node in graph.nodes():
-				x, y = pos[node]
-				annotations_list.append(
-						go.layout.Annotation(text=str(node), x=x, y=y, showarrow=False, font=dict(size=10, color='black')))
-
-			layout = go.Layout(title='Networkx DiGraph',
-								showlegend = False,
-								hovermode  = 'closest',
-								margin     = dict(b    = 20, l = 5, r = 5, t = 40),
-								xaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
-								yaxis = dict(showgrid = False, zeroline = False, showticklabels = False),
-								annotations = annotations_list
-								)
-			fig = go.Figure(data=[edge_trace, node_trace], layout=layout)
-			fig.show()
-
-		if package == 'networkx':
-			sns.set_style("whitegrid")
-			nx.draw(self.graph, with_labels=True)
-
-		elif package == 'plotly':
-			plot_networkx_digraph(self.graph)
+	@property
+	def is_in_taxonomy(self):
+		return self.name in self.taxonomy_info.exist_in_taxonomy
 
 
 @dataclass
 class Data:
+	config: Settings
 	dataset: xrv.datasets.Dataset
-	data_loader: torch_DataLoader = field( default=None )
-	labels: pd.DataFrame = field( init=False )
-	nodes: Nodes = field( init=False )
+	data_loader: torch_DataLoader = None
 
-	def __post_init__(self):
-		self.labels = Data.create_labels_dataframe(self.dataset)
-		self.nodes  = Data.create_nodes(self.labels)
+	@property
+	def labels(self) -> pd.DataFrame:
+		return pd.DataFrame(self.dataset.labels, columns=self.dataset.pathologies)
 
-	@staticmethod
-	def create_labels_dataframe(dataset: xrv.datasets.Dataset) -> pd.DataFrame:
-		return pd.DataFrame(dataset.labels, columns=dataset.pathologies)
+	@cached_property
+	def taxonomy_info(self) -> TaxonomyInfo:
+		return TaxonomyInfo(labels=self.labels, config=self.config)
 
-	@staticmethod
-	def create_nodes(labels: pd.DataFrame) -> Nodes:
-		return Nodes(labels=labels)
+	@cached_property
+	def nodes(self) -> list[Node]:
+		return [Node(name=n, taxonomy_info=self.taxonomy_info) for n in self.taxonomy_info.classes]
 
 
 @dataclass
@@ -223,7 +146,7 @@ class LoadChestXrayDatasets:
 	datasetInfo: DatasetInfo
 	dataset: xrv.datasets.Dataset = None
 	labels: pd.DataFrame = None
-	nodes: Nodes = None
+	nodes: TaxonomyInfo = None
 	train: Data = None
 	test: Data = None
 
@@ -254,13 +177,13 @@ class LoadChestXrayDatasets:
 				Download resized (224x224) images here:
 				https://academictorrents.com/details/e615d3aebce373f1dc8bd9d11064da55bdadede0
 
-			# PadChest: A large chest thresh_technique-ray image dataset_full with multi-label annotated reports. https://arxiv.org/abs/1901.07441
+			# PadChest: A large chest threshold_technique-ray image dataset_full with multi-label annotated reports. https://arxiv.org/abs/1901.07441
 				Note that images with null labels (as opposed to normal), and images that cannot
 				be properly loaded (listed as 'missing' in the code) are excluded, which makes
 				the total number of available images slightly less than the total number of image
 				files.
 
-				PadChest: A large chest thresh_technique-ray image dataset_full with multi-label annotated reports.
+				PadChest: A large chest threshold_technique-ray image dataset_full with multi-label annotated reports.
 				Aurelia Bustos, Antonio Pertusa, Jose-Maria Salinas, and Maria de la Iglesia-Vayá.
 				arXiv preprint, 2019. https://arxiv.org/abs/1901.07441
 				Dataset website: https://bimcv.cipf.es/bimcv-projects/padchest/
