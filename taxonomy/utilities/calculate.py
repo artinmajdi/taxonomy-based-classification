@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Tuple, Union
 
 import numpy as np
@@ -9,8 +9,8 @@ import torch
 
 from taxonomy.utilities.data import Data, Node
 from taxonomy.utilities.findings import Findings, ModelOutputs, ModelOutputsNode
-from taxonomy.utilities.hyper_parameter import HyperParameters, HyperPrametersNode
-from taxonomy.utilities.metric import CalculateMetrics, Metrics
+from taxonomy.utilities.hyperparameters import HyperParameters, HyperPrametersNode
+from taxonomy.utilities.metrics import CalculateMetricsNode, Metrics
 from taxonomy.utilities.model import ModelType
 from taxonomy.utilities.params import ExperimentStageNames, ParentMetricToUseNames, TechniqueNames
 from taxonomy.utilities.settings import Settings
@@ -106,7 +106,7 @@ class CalculateOriginalFindings:
 			# Adding model outputs to the findings.
 			self.findings.model_outputs = model_outputs
 
-			self.findings.metrics = CalculateMetrics(config=self.config, REMOVE_NULL=True).calculate(model_outputs=self.findings.model_outputs)
+			self.findings.metrics = Metrics.calculate(config=self.config, model_outputs=self.findings.model_outputs)
 
 		return self
 
@@ -131,37 +131,48 @@ class CalculateOriginalFindings:
 		return self
 
 
+@dataclass
 class CalculateNewFindings:
 	findings_original: Findings
-	hyper_parameters : HyperParameters
+	hyperparameters : HyperParameters
+	config : Settings = field(init=False)
 
 	def __post_init__(self):
-		self.config = self.findings_original.config
-		self.technique_name = self.config.technique.technique_name
+		self.config 		= self.findings_original.config
+		self.technique_name = self.findings_original.config.technique.technique_name
 
 		self.findings = Findings( config = self.findings_original.config,
 								  data   = self.findings_original.data,
 								  model  = self.findings_original.model,
-								  experiment_stage = ExperimentStageNames.NEW)@dataclass
-
+								  experiment_stage = ExperimentStageNames.NEW)
 
 	@classmethod
-	def calculate(cls, findings_original: Findings, hyper_parameters: HyperParameters) -> 'CalculateNewFindings':
+	def calculate(cls, findings_original: Findings, hyperparameters: HyperParameters) -> 'CalculateNewFindings':
 
-		self = cls(findings_original=findings_original, hyper_parameters=hyper_parameters)
+		CNF = cls(findings_original=findings_original, hyperparameters=hyperparameters)
+
+		model_outputs_original = CNF.findings_original.model_outputs
+		THRESHOLD_original     = CNF.findings_original.metrics.THRESHOLD
+		config = findings_original.config
 
 		# Initializing the model_outputs with empty dataframes
-		truth = self.findings_original.model_outputs.truth
-		self.findings.model_outputs = ModelOutputs.initialize(columns=truth.columns, index=truth.index)
-
-		for node in self.findings_original.data.nodes.classes:
-			self.findings.model_outputs[node] = self.calculate_for_node(node=node, findings_original=findings_original, hyper_parameters_node=hyper_parameters[node])
+		model_outputs_new = ModelOutputs.initialize( columns = model_outputs_original.truth.columns,
+												     index   = model_outputs_original.truth.index)
 
 
-		# Calculating the metrics
-		self.findings.metrics = Metrics.calculate(config=self.config, REMOVE_NULL=True, model_outputs=self.findings.model_outputs)
+		for node in CNF.findings_original.data.nodes:
+			UMOnode = UpdateModelOutputs_wrt_Hyperparameters_Node( config		 = config,
+																   node 		 = node,
+																   model_outputs = model_outputs_original,
+																   THRESHOLD     = THRESHOLD_original)
 
-		return self
+			model_outputs_new[node] = UMOnode.calculate(args=hyperparameters[node]).model_outputs_node
+
+		CNF.findings.model_outputs = model_outputs_new
+		CNF.findings.update_metrics()
+
+		return CNF
+
 
 	def save(self) -> 'CalculateNewFindings':
 
@@ -172,6 +183,7 @@ class CalculateNewFindings:
 		self.findings.metrics.save(config=self.config, experiment_stage=ExperimentStageNames.NEW)
 
 		return self
+
 
 	def load(self) -> 'CalculateNewFindings':
 
@@ -184,16 +196,29 @@ class CalculateNewFindings:
 		return self
 
 
-class CalculateNewFindingsForNode:
-	config: Settings
-	node: Node
-	node_data: ModelOutputsNode
-	parent_data: ModelOutputsNode
-	hyper_parameters_node : HyperPrametersNode
-	THRESHOLD_parent: float = 0.5
+@dataclass
+class UpdateModelOutputs_wrt_Hyperparameters_Node:
+	config               : Settings
+	node                 : Node
+	model_outputs_node   : ModelOutputsNode
+	model_outputs_parent : ModelOutputsNode
+	THRESHOLD_node       : float
+	THRESHOLD_parent     : float
+	hyperparameters_node : HyperPrametersNode = field(default=None, init=False)
+
+	def __new__(cls, config: Settings, node: Node = None, **kwargs):
+
+		params = {
+			'data_node'       : kwargs.get('data_node')        or kwargs.get('model_outputs')[node],
+			'data_parent'     : kwargs.get('data_parent')      or kwargs.get('model_outputs')[node.parent],
+			'THRESHOLD_node'  : kwargs.get('THRESHOLD_node')   or kwargs.get('THRESHOLD')[node],
+			'THRESHOLD_parent': kwargs.get('THRESHOLD_parent') or kwargs.get('THRESHOLD')[node.parent]
+				}
+
+		return super().__new__(cls, config=config, node=node, **params)
 
 	def __post_init__(self):
-		self.technique_name      : TechniqueNames         = self.config.technique.technique_name
+		self.technique_name      : TechniqueNames = self.config.technique.technique_name
 		self.parent_metric_to_use: ParentMetricToUseNames = self.config.technique.parent_metric_to_use
 
 	def _calculate_penalty_score(self) -> Union[pd.Series, np.ndarray]:
@@ -201,27 +226,27 @@ class CalculateNewFindingsForNode:
 		def parent_exist_samples():
 
 			if self.parent_metric_to_use == ParentMetricToUseNames.NONE:
-				return np.ones_like( self.parent_data.truth, dtype=bool )
+				return np.ones_like( self.model_outputs_parent.truth, dtype=bool )
 
 			elif self.parent_metric_to_use == ParentMetricToUseNames.TRUTH:
-				return self.parent_data.truth >= self.THRESHOLD_parent
+				return self.model_outputs_parent.truth >= self.THRESHOLD_parent
 
 			elif self.parent_metric_to_use == ParentMetricToUseNames.PRED:
-				return self.parent_data.pred >= self.THRESHOLD_parent
+				return self.model_outputs_parent.pred >= self.THRESHOLD_parent
 
 			else:
 				raise NotImplementedError(f"ParentMetricToUseNames {self.parent_metric_to_use} not implemented")
 
-		# The hyper_parameters for the current node
-		MULTIPLIER: float = self.hyper_parameters_node.MULTIPLIER
-		ADDITIVE  : float = self.hyper_parameters_node.ADDITIVE
+		# The hyperparameters for the current node
+		MULTIPLIER: float = self.hyperparameters_node.MULTIPLIER
+		ADDITIVE  : float = self.hyperparameters_node.ADDITIVE
 
 		# Calculating the initial hierarchy_penalty based on "a", "b" and "technique_name"
 		if self.technique_name == TechniqueNames.LOGIT:
-			penalty_score = MULTIPLIER * self.parent_data.logit
+			penalty_score = MULTIPLIER * self.model_outputs_parent.logit
 
 		elif self.technique_name == TechniqueNames.LOSS:
-			penalty_score = MULTIPLIER * self.parent_data.loss + ADDITIVE
+			penalty_score = MULTIPLIER * self.model_outputs_parent.loss + ADDITIVE
 
 		else:
 			raise NotImplementedError(f"Technique {self.technique_name} not implemented")
@@ -230,43 +255,54 @@ class CalculateNewFindingsForNode:
 		penalty_score[parent_exist_samples()] = 1.0
 
 		# Setting the hierarchy_penalty to 1.0 for samples where we don't have the truth label for parent class.
-		penalty_score[self.parent_data.truth.isnull()] = 1.0
+		penalty_score[self.model_outputs_parent.truth.isnull()] = 1.0
 
 		return penalty_score
 
-	def _apply_penalty_score_to_node_data(self) -> ModelOutputsNode:
+	def apply_penalty(self) -> ModelOutputsNode:
 
 		penalty_score = self._calculate_penalty_score()
 
 		if self.technique_name == TechniqueNames.LOSS:
 			# Measuring the new loss values
-			self.node_data.loss = penalty_score * self.node_data.loss
+			self.model_outputs_node.loss = penalty_score * self.model_outputs_node.loss
 
 			# Calculating the loss gradient to find the direction of changes
-			loss_gradient = -self.node_data.truth / (self.node_data.pred + 1e-7) + (1 - self.node_data.truth) / (1 - self.node_data.pred + 1e-7)
+			loss_gradient = -self.model_outputs_node.truth / (self.model_outputs_node.pred + 1e-7) + (1 - self.model_outputs_node.truth) / (1 - self.model_outputs_node.pred + 1e-7)
 
 			# Calculating the new predicted probability
-			self.node_data.pred = np.exp( -self.node_data.loss )
+			self.model_outputs_node.pred = np.exp( -self.model_outputs_node.loss )
 
 			condition = loss_gradient >= 0
-			self.node_data.pred[condition] = 1 - self.node_data.pred[condition]
+			self.model_outputs_node.pred[condition] = 1 - self.model_outputs_node.pred[condition]
 
 		elif self.technique_name == TechniqueNames.LOGIT:
 			# Measuring the new loss values
-			self.node_data.logit = penalty_score + self.node_data.logit
+			self.model_outputs_node.logit = penalty_score + self.model_outputs_node.logit
 
 			# Calculating the new predicted probability
-			self.node_data.pred = 1 / (1 + np.exp( -self.node_data.logit ))
+			self.model_outputs_node.pred = 1 / (1 + np.exp( -self.model_outputs_node.logit ))
 
 		else:
 			raise NotImplementedError(f"Technique {self.technique_name} not implemented")
 
-		return self.node_data
+		return self.model_outputs_node
 
-	def calculate(self) -> ModelOutputsNode:
+	def calculate(self, args: Union[HyperPrametersNode, dict]) -> 'UpdateModelOutputs_wrt_Hyperparameters_Node':
 
-		if self.node.parent is None:
-			return self.node_data
+		self.hyperparameters_node = args if isinstance( args, HyperPrametersNode ) else HyperPrametersNode( **args )
 
-		return self._apply_penalty_score_to_node_data()
+		if self.node.parent is not None:
+			self.apply_penalty()
+
+		return self
+
+	@property
+	def optimization_metric_value(self) -> float:
+		CMN = CalculateMetricsNode( node 			   = self.node,
+									model_outputs_node = self.model_outputs_node,
+									config             = self.config,
+									THRESHOLD          = self.THRESHOLD_node )
+
+		return getattr(CMN, self.config.hyperparameter_tuning.optimization_metric.name)
 

@@ -11,10 +11,12 @@ import torch
 from matplotlib import pyplot as plt
 
 from taxonomy.utilities.data import Data, LoadSaveFile, Node
+from taxonomy.utilities.hyper_parameter import HyperParameters, HyperPrametersNode
 from taxonomy.utilities.metrics import Metrics
 from taxonomy.utilities.model import ModelType
 from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, TechniqueNames
 from taxonomy.utilities.settings import Settings
+from taxonomy.utilities.utils import node_type_checker
 
 USE_CUDA = torch.cuda.is_available()
 device = 'cuda' if USE_CUDA else 'cpu'
@@ -41,6 +43,7 @@ class ModelOutputsNode:
 				setattr(self, key, pd.Series(value, index=classes))
 		return self
 
+
 @dataclass
 class ModelOutputs:
 	""" Class for storing model-related findings. """
@@ -49,22 +52,14 @@ class ModelOutputs:
 	logit: pd.DataFrame = None
 	pred : pd.DataFrame = None
 
+
 	@classmethod
 	def initialize(cls, index: Optional[pd.Index] = None, columns: Optional[pd.Index] = None) -> 'ModelOutputs':
+		return cls( truth = pd.DataFrame( columns=columns, index=index ),
+					loss  = pd.DataFrame( columns=columns, index=index ),
+					logit = pd.DataFrame( columns=columns, index=index ),
+					pred  = pd.DataFrame( columns=columns, index=index ))
 
-		if columns is not None:
-			return cls( truth= pd.DataFrame( columns=columns, index=index ),
-						loss= pd.DataFrame( columns=columns, index=index ),
-						logit = pd.DataFrame( columns=columns, index=index ),
-						pred  = pd.DataFrame( columns=columns, index=index ) )
-
-		elif index is not None:
-			return cls( truth= pd.Series( index=index ),
-						loss= pd.Series( index=index ),
-						logit = pd.Series( index=index ),
-						pred  = pd.Series( index=index ) )
-		else:
-			raise ValueError( "Either index or columns must be passed" )
 
 	def save(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
 
@@ -78,6 +73,7 @@ class ModelOutputs:
 			self.pred.to_excel( writer , sheet_name = 'pred' )
 		return self
 
+
 	def load(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
 
 		input_path = config.output.path / f'{experiment_stage}/model_outputs.xlsx'
@@ -89,11 +85,15 @@ class ModelOutputs:
 			self.pred  = pd.read_excel( input_path, sheet_name  = 'pred' )
 		return self
 
-	def __getitem__(self, node: str) -> 'ModelOutputsNode':
+
+	@node_type_checker
+	def __getitem__(self, node: Union[Node, str]) -> 'ModelOutputsNode':
 		return ModelOutputsNode( truth=self.truth[node], loss=self.loss[node],
 								 logit=self.logit[node], pred=self.pred[node] )
 
-	def __setitem__(self, node: str, value: ModelOutputsNode):
+
+	@node_type_checker
+	def __setitem__(self, node: Union[Node, str], value: ModelOutputsNode):
 
 		assert isinstance( value, ModelOutputsNode ), "Value must be of type ModelOutputsNode"
 
@@ -105,27 +105,25 @@ class ModelOutputs:
 
 @dataclass
 class FindingsNode:
-	config: Settings
-	node: Node
-	hyper_parameters_node: 'HyperPrametersNode' = None
-	model_outputs_node: 'ModelOutputsNode' = None
+	config              : Settings
+	node                : Node
+	hyperparameters_node: HyperPrametersNode = None
+	model_outputs_node  : ModelOutputsNode   = None
 
 
 @dataclass
 class Findings:
 	""" Class for storing overall findings including configuration, data, and metrics. """
 	config          : Settings
-	data            : Data            = field( default = None )
-	model           : ModelType       = field( default = None )
-	model_outputs   : ModelOutputs    = field( default = None  , init = False )
-	metrics         : Metrics         = field( default = None  , init = False )
-	hyper_parameters: 'HyperParameters' = field( default = None )
+	data            : Data = None
+	model           : ModelType = None
+	model_outputs   : ModelOutputs = field(default = None, init = False)
+	metrics         : Metrics = field(default = None, init = False)
+	hyperparameters : HyperParameters = None
 	experiment_stage: ExperimentStageNames = ExperimentStageNames.ORIGINAL
 
-	def __getitem__(self, item):
-		return getattr( self, item )
-
-
+	def update_metrics(self):
+		self.metrics = Metrics.calculate( config=self.config, model_outputs=self.model_outputs )
 
 @dataclass
 class FindingsTrainTest:
@@ -154,6 +152,7 @@ class FindingsAllTechniques:
 	@property
 	def config(self):
 		return self._get_obj().TEST.config
+
 
 	def plot_roc_curves(self, save_figure=True, figsize=(15, 15), font_scale=1.8, fontsize=20, labelpad=0):
 
@@ -262,7 +261,7 @@ class TaxonomyXRV:
 
 	def __init__(self, config: Settings, seed: int=10):
 
-		self.hyper_parameters = None
+		self.hyperparameters = None
 		self.config         : Settings                  = config
 		self.train          : Optional[Data]                      = None
 		self.test           : Optional[Data]                      = None
@@ -442,15 +441,15 @@ class TaxonomyXRV:
 		FE.train = CalculateOriginalFindings.get_updated_data(data=FE.train, **param_dict)
 		FE.test  = CalculateOriginalFindings.get_updated_data(data=FE.test , **param_dict)
 
-		# Calculating the hyper_parameters
-		FE.hyper_parameters = HyperParameterTuning.get_updated_data(data=FE.train, **param_dict)
+		# Calculating the hyperparameters
+		FE.hyperparameters = HyperParameterTuning.get_updated_data(data=FE.train, **param_dict)
 
 		# Adding the new findings to the graph nodes
-		FE.train.Hierarchy_cls.update_graph(hyper_parameters=FE.hyper_parameters)
-		FE.test. Hierarchy_cls.update_graph(hyper_parameters=FE.hyper_parameters)
+		FE.train.Hierarchy_cls.update_graph(hyperparameters=FE.hyperparameters)
+		FE.test. Hierarchy_cls.update_graph(hyperparameters=FE.hyperparameters)
 
 		# Measuring the updated metrics (predictions and losses, thresholds, aucs, etc.)
-		param_dict = {key: getattr(FE, key) for key in ['model', 'config', 'hyper_parameters']}
+		param_dict = {key: getattr(FE, key) for key in ['model', 'config', 'hyperparameters']}
 		FE.train = CalculateNewFindings.get_updated_data(data=FE.train, technique_name=technique_name, **param_dict)
 		FE.test  = CalculateNewFindings.get_updated_data(data=FE.test , technique_name=technique_name, **param_dict)
 
@@ -499,7 +498,7 @@ class TaxonomyXRV:
 
 			baseline, proposed = cls.get_merged_data(data_mode=data_mode, technique_name=technique_name, threshold_technique=threshold_technique, datasets_list=datasets_list)
 
-			def get_auc_acc_f1(node: str, data: DataMerged):
+			def get_auc_acc_f1(Union[Node, str], data: DataMerged):
 
 				# Finding the indices where the truth is not nan
 				non_null = ~np.isnan( data.truth[node] )

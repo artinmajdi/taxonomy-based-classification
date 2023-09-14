@@ -97,6 +97,7 @@ class TrainingSettings(BaseModel):
 	shuffle: bool = False
 	silent : bool = True
 
+
 class ModelSettings(BaseModel):
 	modelName            : ModelWeightNames = ModelWeightNames.ALL_224
 	chexpert_weights_path: pathlib.Path     = pathlib.Path("./pre_trained_models/chestxray/chexpert_baseline_model_weight.zip")
@@ -105,13 +106,15 @@ class ModelSettings(BaseModel):
 	def full_name(self) -> str:
 		return self.modelName.full_name
 
+
 class SimulationSettings(BaseModel):
 	findings_original  : SimulationOptions = SimulationOptions.RUN_SIMULATION
 	findings_new       : SimulationOptions = SimulationOptions.RUN_SIMULATION
-	hyper_parameters    : SimulationOptions = SimulationOptions.RUN_SIMULATION
+	hyperparameters    : SimulationOptions = SimulationOptions.RUN_SIMULATION
 	metrics            : SimulationOptions = SimulationOptions.RUN_SIMULATION
 	use_parallelization: bool = True
 	num_workers        : conint(gt         = 0) = 1
+
 
 class TechniqueSettings(BaseModel):
 	technique_name                       : TechniqueNames = TechniqueNames.LOGIT
@@ -119,12 +122,15 @@ class TechniqueSettings(BaseModel):
 	parent_metric_to_use                 : ParentMetricToUseNames = ParentMetricToUseNames.TRUTH
 	threshold_technique                     : ThreshTechList = ThreshTechList.ROC
 
+
 class HyperParameterTuningSettings(BaseModel):
 	max_evals              : conint(gt = 0) = 20
 	initial_multiplier     : confloat(ge = 0) = 0.0
 	initial_additive       : confloat(ge = 0) = 1.0
 	search_space_multiplier: list[float] = [-1, 1]
 	search_space_additive  : list[float] = [-4, 4]
+	optimization_metric: EvaluationMetricNames = EvaluationMetricNames.AUC
+
 
 class OutputSettings(BaseModel):
 	path: pathlib.Path = pathlib.Path('../outputs')
@@ -132,6 +138,7 @@ class OutputSettings(BaseModel):
 	@field_validator('path', mode='after')
 	def make_path_absolute(cls, v: pathlib.Path):
 		return v.resolve()
+
 
 class Settings(BaseModel):
 
@@ -146,6 +153,7 @@ class Settings(BaseModel):
 		use_enum_values      = False
 		case_sensitive       = False
 		str_strip_whitespace = True
+
 
 def get_settings(argv=None, jupyter=True, config_path='config.json') -> Settings:
 
@@ -236,10 +244,12 @@ def get_settings(argv=None, jupyter=True, config_path='config.json') -> Settings
 	# Updating the config file
 	return  get_config(args_dict=parse_args())
 
+
 def main():
 	config = get_settings()
 	print(config.dataset.datasetInfoList)
 	print('sometjhong')
+
 
 if __name__ == '__main__':
 	main()

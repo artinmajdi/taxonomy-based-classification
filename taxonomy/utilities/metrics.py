@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, InitVar
+from dataclasses import dataclass
 from functools import cached_property
 from typing import Optional, Union
 
@@ -8,44 +8,52 @@ import numpy as np
 import pandas as pd
 import sklearn
 
+from taxonomy.utilities.data import Node
 from taxonomy.utilities.params import ExperimentStageNames, ThreshTechList
 from taxonomy.utilities.settings import Settings
-from taxonomy.utilities.utils import PrecisionRecall, remove_null_samples, ROC
+from taxonomy.utilities.utils import get_y_yhat, node_type_checker, PrecisionRecall, ROC
 
 
 @dataclass
 class CalculateMetricsNode:
-	y          : Union[np.ndarray , pd.Series]
-	yhat       : Union[np.ndarray , pd.Series]
-	REMOVE_NULL: bool              = True
-	config     : InitVar[Settings] = None
+	y     : np.ndarray
+	yhat  : np.ndarray
+	THRESHOLD: float
 
-	def __post_init__(self, config: Settings):
+	def __new__(cls, node: Node, **kwargs) -> 'CalculateMetricsNode':
 
-		self.threshold_technique = config.hyperparameter_tuning.threshold_technique
+		kwargs_keys = set(kwargs.keys())
 
-		if len(self.y.shape) > 1:
-			raise ValueError("y must be 1-dimensional")
+		def get_threshold() -> float:
 
-		if isinstance(self.y, pd.Series):
-			self.y, self.yhat = self.y.to_numpy(), self.yhat.to_numpy()
+			if 'THRESHOLD' in kwargs:
+				return kwargs['THRESHOLD']
 
-		if self.REMOVE_NULL:
-			self.y, self.yhat = remove_null_samples( truth=self.y, yhat=self.yhat, RAISE_ValueError_IF_EMPTY=False )
+			assert kwargs_keys.intersection({'config', 'threshold_technique'}), "Either config or threshold_technique must be passed"
 
-	@cached_property
-	def THRESHOLD(self) -> float:
+			th_teq = kwargs.get("threshold_technique") or kwargs.get("config").hyperparameter_tuning.threshold_technique
+			return cls.calculate_optimum_threshold(y=y, yhat=yhat, threshold_technique=th_teq)
 
-		if self.threshold_technique == ThreshTechList.DEFAULT:
+		y, yhat = get_y_yhat(**kwargs)
+		y, yhat = y[node.non_null_indices], yhat[node.non_null_indices]
+
+		THRESHOLD = get_threshold()
+
+		return super().__new__(cls, y=y, yhat=yhat, THRESHOLD=THRESHOLD)
+
+	@staticmethod
+	def calculate_optimum_threshold(y: np.ndarray, yhat: np.ndarray, threshold_technique: ThreshTechList) -> float:
+
+		if threshold_technique == ThreshTechList.DEFAULT:
 			return 0.5
 
-		if self.threshold_technique == ThreshTechList.ROC:
-			return ROC( y=self.y, yhat=self.yhat, REMOVE_NULL=False ).calculate().THRESHOLD
+		if threshold_technique == ThreshTechList.ROC:
+			return ROC( y=y, yhat=yhat, REMOVE_NULL=False ).calculate().THRESHOLD
 
-		if self.threshold_technique == ThreshTechList.PRECISION_RECALL:
-			return PrecisionRecall( y=self.y, yhat=self.yhat, REMOVE_NULL=False ).calculate().THRESHOLD
+		if threshold_technique == ThreshTechList.PRECISION_RECALL:
+			return PrecisionRecall( y=y, yhat=yhat, REMOVE_NULL=False ).calculate().THRESHOLD
 
-		raise NotImplementedError( f"ThreshTechList {self.threshold_technique} not implemented" )
+		raise NotImplementedError( f"ThreshTechList {threshold_technique} not implemented" )
 
 	@cached_property
 	def AUC(self) -> float:
@@ -59,6 +67,7 @@ class CalculateMetricsNode:
 	def F1(self) -> float:
 		return sklearn.metrics.f1_score( self.y, self.yhat > self.THRESHOLD )
 
+	@cached_property
 	def get_all(self) -> MetricsNode:
 		return MetricsNode( ACC=self.ACC, AUC=self.AUC, F1=self.F1, THRESHOLD=self.THRESHOLD )
 
@@ -71,8 +80,8 @@ class MetricsNode:
 	THRESHOLD: float = None
 
 	@classmethod
-	def calculate(cls, y: Union[np.ndarray, pd.Series], yhat: Union[np.ndarray, pd.Series], REMOVE_NULL: bool =True, config: Settings = None) -> 'MetricsNode':
-		return CalculateMetricsNode(y=y, yhat=yhat, REMOVE_NULL=REMOVE_NULL, config=config).get_all()
+	def calculate(cls, y: Union[np.ndarray, pd.Series], yhat: Union[np.ndarray, pd.Series], node: Node, config: Settings) -> 'MetricsNode':
+		return CalculateMetricsNode( y=y, yhat=yhat, config=config, node=node).get_all
 
 
 @dataclass
@@ -120,10 +129,12 @@ class Metrics:
 			self.THRESHOLD = set_formatted(pd.read_excel(input_path, sheet_name = 'threshold', index_col = 0, squeeze = True))
 		return self
 
-	def __getitem__(self, node: str) -> MetricsNode:
+	@node_type_checker
+	def __getitem__(self, node: Union[Node, str]) -> 'MetricsNode':
 		return MetricsNode( AUC=self.AUC[node], ACC=self.ACC[node], F1=self.F1[node], THRESHOLD=self.THRESHOLD[node] )
 
-	def __setitem__(self, node: str, value: MetricsNode):
+	@node_type_checker
+	def __setitem__(self, node: Union[Node, str], value: MetricsNode):
 
 		assert isinstance( value, MetricsNode ), "Value must be of type MetricsNode"
 
@@ -133,7 +144,7 @@ class Metrics:
 		self.THRESHOLD[node] = value.THRESHOLD
 
 	@classmethod
-	def calculate(cls, config: Settings, REMOVE_NULL: bool =True, **kwargs) -> 'Metrics':
+	def calculate(cls, config: Settings, **kwargs) -> 'Metrics':
 
 		if not set(kwargs.keys()).intersection({'truth', 'pred', 'model_outputs'}):
 			raise ValueError("Either truth, pred or model_outputs must be passed")
@@ -145,7 +156,7 @@ class Metrics:
 		metrics = cls.initialize(classes)
 
 		for node in classes:
-			metrics[node] = MetricsNode.calculate( y=truth[node], yhat=pred[node], REMOVE_NULL=REMOVE_NULL, config=config )
+			metrics[node] = MetricsNode.calculate( y=truth[node], yhat=pred[node], config=config, node=node )
 
 		return metrics
 

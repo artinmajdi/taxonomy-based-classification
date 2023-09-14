@@ -28,7 +28,7 @@
   "simulation": {
     "findings_original": "load_from_local",
     "findings_new"     : "load_from_local",
-    "hyper_parameters"  : "load_from_local",
+    "hyperparameters"  : "load_from_local",
     "metrics"          : "load_from_local",
     "use_parallelization"                  : true,
     "num_workers"                          : 1
@@ -44,7 +44,8 @@
     "initial_multiplier"                   : 0.0,
     "initial_additive"                     : 1.0,
     "search_space_multiplier"              : [-1, 1],
-    "search_space_additive"                : [-4, 4]
+    "search_space_additive"                : [-4, 4],
+    "optimization_metric"                  : "auc"
   },
   "output": {
     "path": "./outputs"

@@ -10,8 +10,7 @@ import torchxrayvision as xrv
 from taxonomy.utilities.data import Data, DataTrainTest
 from taxonomy.utilities.params import DataModes, ModelWeightNames
 from taxonomy.utilities.settings import Settings
-
-USE_CUDA = torch.cuda.is_available()
+from taxonomy.utilities.utils import USE_CUDA, device
 
 
 @dataclass
@@ -64,7 +63,7 @@ class LoadModelXRV:
 		return xrv.models.model_urls[config.modelName]['labels']
 
 	@classmethod
-	def extract_feature_maps(cls, config: Settings, data_mode: DataModes) -> Tuple[np.ndarray, pd.DataFrame, list]:
+	def extract_feature_maps(cls, config: Settings, data_mode: DataModes) -> tuple[np.ndarray, pd.DataFrame, list]:
 
 		def _get_data() -> Data:
 			from taxonomy.utilities.data import LoadChestXrayDatasets
@@ -74,7 +73,7 @@ class LoadModelXRV:
 		model: ModelType = cls(config = config).load().model
 		data: Data = _get_data()
 
-		def process_one_batch(batch_data) -> Tuple[np.ndarray, np.ndarray]:
+		def process_one_batch(batch_data) -> tuple[np.ndarray, np.ndarray]:
 
 			# Getting the data and its corresponding true labels
 			device = 'cuda' if USE_CUDA else 'cpu'
@@ -86,7 +85,7 @@ class LoadModelXRV:
 			truth_batch   : np.ndarray = batch_data["lab" ].to(device).detach().cpu()
 			return features_batch, truth_batch
 
-		def looping_over_all_batches() -> Tuple[np.ndarray, np.ndarray]:
+		def looping_over_all_batches() -> tuple[np.ndarray, np.ndarray]:
 
 			batches_to_process = config.training.batches_to_process
 			d_features, d_truth  = [], []

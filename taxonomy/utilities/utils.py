@@ -1,10 +1,15 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Tuple, TYPE_CHECKING, TypeAlias, Union
+from functools import wraps
+from typing import TYPE_CHECKING, TypeAlias, Union
 
 import numpy as np
 import pandas as pd
 import sklearn
+import torch
+
+from taxonomy.utilities.data import Node
 
 if TYPE_CHECKING:
 	from taxonomy.utilities.findings import ModelOutputsNode
@@ -13,13 +18,42 @@ if TYPE_CHECKING:
 Array_Series: TypeAlias = Union[np.ndarray, pd.Series]
 Array_Series_DataFrame: TypeAlias = Union[np.ndarray, pd.Series, pd.DataFrame]
 
+USE_CUDA = torch.cuda.is_available()
+device = 'cuda' if USE_CUDA else 'cpu'
 
-def get_y_yhat(kwargs: dict) -> Tuple[Array_Series, Array_Series]:
-	""" Extract y and yhat from keyword arguments or positional arguments. """
+
+def node_type_checker(func):
+	@wraps(func)
+	def wrapper(*args, **kwargs):
+		if 'node' in kwargs:
+			node = kwargs['node']
+		elif len(args) > 0:
+			node, *args = args
+		else:
+			raise ValueError("node must be passed as a keyword argument or positional argument")
+
+		kwargs['node'] = node.name if isinstance(node, Node) else node
+		return func(*args, **kwargs)
+	return wrapper
+
+
+def get_y_yhat(**kwargs) -> tuple[np.ndarray, np.ndarray]:
 
 	try:
-		y    = kwargs['model_outputs'].truth if 'model_outputs' in kwargs else kwargs.get('y')    or kwargs.get('truth')
-		yhat = kwargs['model_outputs'].pred  if 'model_outputs' in kwargs else kwargs.get('yhat') or kwargs.get('pred')
+
+		if 'model_outputs_node' in kwargs:
+			y    = kwargs['model_outputs_node'].truth
+			yhat = kwargs['model_outputs_node'].pred
+		else:
+			y    = kwargs.get('y')    or kwargs.get('truth')
+			yhat = kwargs.get('yhat') or kwargs.get('pred')
+
+		if len(y.shape) > 1:
+			raise ValueError("y must be 1-dimensional")
+
+		if isinstance(y, pd.Series):
+			y, yhat = y.to_numpy(), yhat.to_numpy()
+
 		return y, yhat
 
 	except KeyError as e:
@@ -27,7 +61,7 @@ def get_y_yhat(kwargs: dict) -> Tuple[Array_Series, Array_Series]:
 		raise KeyError(f"Key {e} not found in kwargs") from e
 
 	except AttributeError as e:
-		"The AttributeErrorwould occur if the model_outputs object does not have the attributes truth or pred."
+		"The AttributeErrorwould occur if the model_outputs_node object does not have the attributes truth or pred."
 		raise AttributeError(f"Attribute {e} not found in kwargs") from e
 
 	except TypeError as e:
