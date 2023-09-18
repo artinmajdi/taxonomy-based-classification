@@ -2,6 +2,7 @@
   "dataset": {
     "data_mode"        : "train",
     "views"            : ["AP", "PA"],
+    "USE_INCLUDED_FILEUSE_INCLUDED_FILE_IN_TORCHXRAYVISION": true,
     "path_all_datasets": "F:/Datasets",
     "datasetNames"     : ["chex", "nih", "pc"],
     "datasetInfoList"  : [],

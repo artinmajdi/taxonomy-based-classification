@@ -33,7 +33,7 @@ class TaxonomyInfo:
 	IMPACTED         : set = field(init = False)
 	default_taxonomy : dict = field( init = False )
 
-	def __post_init__(self, labels: pd.DataFrame, config: Settings):
+	def __post_init__(self, labels: pd.DataFrame, config: 'Settings'):
 
 		self.default_taxonomy = { key: set( values ) for key, values in config.dataset.default_taxonomy.items() }
 		self.classes = set(labels.columns.to_list())
@@ -91,7 +91,7 @@ class TaxonomyInfo:
 class Node:
 	name            : str
 	taxonomy_info   : TaxonomyInfo
-	non_null_indices: dict[str, pd.Series] = None
+	non_null_indices: dict[str, pd.Series] = field(default=None)
 
 	def __str__(self):
 		return self.name
@@ -119,7 +119,7 @@ class Node:
 
 @dataclass
 class Data:
-	config     : Settings
+	config     : 'Settings'
 	dataset    : xrv.datasets.Dataset
 	labels     : pd.DataFrame     = None
 	data_loader: torch_DataLoader = None
@@ -155,18 +155,18 @@ class Data:
 
 @dataclass
 class DataTrainTest:
-	train: Data = field(default=None)
-	test : Data = field(default=None)
+	train: 'Data' = field(default=None)
+	test : 'Data' = field(default=None)
 
 @dataclass
 class LoadChestXrayDatasets:
-	config     : Settings
-	datasetInfo: Union[DatasetInfo, None] = None
+	config     : 'Settings'
+	datasetInfo: Union[DatasetInfo, None] = field(default=None)
 	dataset    : xrv.datasets.Dataset = field(init = False)
 	labels     : pd.DataFrame = field(init = False)
-	data       : Data = field(init = False)
-	train      : Data = field(init = False)
-	test       : Data = field(init = False)
+	data       : 'Data' = field(init = False)
+	train      : 'Data' = field(init = False)
+	test       : 'Data' = field(init = False)
 
 	def load_raw_database(self) -> 'LoadChestXrayDatasets':
 		"""
@@ -243,10 +243,10 @@ class LoadChestXrayDatasets:
 				DatasetNames.PC        : xrv.datasets.PC_Dataset,
 				DatasetNames.CHEXPERT  : xrv.datasets.CheX_Dataset,
 				DatasetNames.MIMIC     : xrv.datasets.MIMIC_Dataset,
-				DatasetNames.Openi     : xrv.datasets.Openi_Dataset,
-				DatasetNames.VinBrain  : xrv.datasets.VinBrain_Dataset,
+				DatasetNames.OPENI     : xrv.datasets.Openi_Dataset,
+				DatasetNames.VINBRAIN  : xrv.datasets.VinBrain_Dataset,
 				DatasetNames.RSNA      : xrv.datasets.RSNA_Pneumonia_Dataset,
-				DatasetNames.NIH_Google: xrv.datasets.NIH_Google_Dataset
+				DatasetNames.NIH_GOOGLE: xrv.datasets.NIH_Google_Dataset
 				}
 		self.dataset = dataset_getter[self.datasetInfo.datasetName](**self.datasetInfo.params_config)
 
@@ -316,12 +316,12 @@ class LoadChestXrayDatasets:
 
 		return self
 
-	def train_test_split(self, data: Data) -> tuple[Data, Data]:
+	def train_test_split(self, data: 'Data') -> tuple['Data', 'Data']:
 
 		# Splitting the data.dataset into train and test
 		idx_train     = data.labels.sample(frac = self.config.dataset.train_test_ratio).index
 		dataset_train = xrv.datasets.SubsetDataset( data.dataset, idxs=idx_train )
-		train: Data = Data(config=self.config, dataset=dataset_train, labels=data.labels.iloc[idx_train])
+		train: 'Data' = Data(config=self.config, dataset=dataset_train, labels=data.labels.iloc[idx_train])
 
 		idx_test     = data.labels.drop(idx_train).index
 		dataset_test = xrv.datasets.SubsetDataset( data.dataset, idxs=idx_test )
@@ -330,7 +330,7 @@ class LoadChestXrayDatasets:
 		return train, test
 
 	@classmethod
-	def load_one_dataset(cls, config: Settings, datasetInfo: DatasetInfo) -> Data:
+	def load_one_dataset(cls, config: 'Settings', datasetInfo: DatasetInfo) -> 'Data':
 
 		DT = cls(config=config, datasetInfo=datasetInfo)
 		DT.load_raw_database()
@@ -342,7 +342,7 @@ class LoadChestXrayDatasets:
 
 	# TODO: need to change all instances where I change something in the labels(dataframe) to change in the dataset.labels (ndarray)
 	@classmethod
-	def load(cls, config: Settings) -> DataTrainTest:
+	def load(cls, config: 'Settings') -> DataTrainTest:
 
 		dataset_list = [cls(config=config, datasetInfo=di).load_raw_database().dataset for di in config.dataset.datasetInfoList]
 
@@ -362,7 +362,7 @@ class LoadChestXrayDatasets:
 		return DataTrainTest( train=train, test=test )
 
 	@staticmethod
-	def create_dataloader(config: Settings, dataset: xrv.datasets.Dataset):
+	def create_dataloader(config: 'Settings', dataset: xrv.datasets.Dataset):
 		data_loader_args = { key: getattr( config, key ) for key in ['batch_size', 'shuffle', 'num_workers'] }
 		return torch.utils.data.DataLoader( dataset, pin_memory=USE_CUDA, **data_loader_args )
 
@@ -468,8 +468,8 @@ class LoadSaveFile:
 
 
 def main():
-	config2 = Settings()
-	_, Test = LoadChestXrayDatasets.load( config2 )
+	config = Settings()
+	_, Test = LoadChestXrayDatasets.load( config )
 
 	print('temp')
 

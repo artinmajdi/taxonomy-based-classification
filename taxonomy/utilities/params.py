@@ -1,12 +1,10 @@
 from __future__ import annotations
-
 import enum
-
 import torch.nn
 
 
 def members(cls):
-	
+
 	# Add the members class method
 	cls.members = classmethod(lambda cls2: list(cls2.__members__))
 
@@ -14,10 +12,10 @@ def members(cls):
 	cls.all = classmethod(lambda cls2: [cls2[n] for n in list(cls2.__members__)])
 
 	# cls.values = classmethod(lambda cls2: [n.value for n in cls2.__members__])
-	
+
 	# Make the class iterable
 	cls.__iter__ = lambda self: iter(self.__members__.keys())
-	
+
 	# Overwrite the __str__ method, to output only the name of the member
 	cls.__str__ = lambda self: self.value
 	return cls

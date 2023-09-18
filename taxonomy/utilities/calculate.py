@@ -21,8 +21,8 @@ device = 'cuda' if USE_CUDA else 'cpu'
 
 @dataclass
 class CalculateOriginalFindings:
-	config: Settings
-	data  : Data
+	config: 'Settings'
+	data  : 'Data'
 	model : ModelType
 
 	def __post_init__(self):
@@ -135,7 +135,7 @@ class CalculateOriginalFindings:
 class CalculateNewFindings:
 	findings_original: Findings
 	hyperparameters : HyperParameters
-	config : Settings = field(init=False)
+	config : 'Settings' = field(init=False)
 
 	def __post_init__(self):
 		self.config 		= self.findings_original.config
@@ -198,7 +198,7 @@ class CalculateNewFindings:
 
 @dataclass
 class UpdateModelOutputs_wrt_Hyperparameters_Node:
-	config               : Settings
+	config               : 'Settings'
 	node                 : Node
 	model_outputs_node   : ModelOutputsNode
 	model_outputs_parent : ModelOutputsNode
@@ -206,7 +206,7 @@ class UpdateModelOutputs_wrt_Hyperparameters_Node:
 	THRESHOLD_parent     : float
 	hyperparameters_node : HyperPrametersNode = field(default=None, init=False)
 
-	def __new__(cls, config: Settings, node: Node = None, **kwargs):
+	def __new__(cls, config: 'Settings', node: Node = None, **kwargs):
 
 		params = {
 			'data_node'       : kwargs.get('data_node')        or kwargs.get('model_outputs')[node],

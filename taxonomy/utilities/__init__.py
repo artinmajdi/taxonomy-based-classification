@@ -1,1 +1,1 @@
-from . import calculate, data, hyper_parameter, metrics, model, params, settings, utils, findings
+from . import params, settings, utils, calculate, data, findings, hyperparameters, metrics, model

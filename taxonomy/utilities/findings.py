@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional, Union
+from typing import Optional, TYPE_CHECKING, Union
 
 import numpy as np
 import pandas as pd
@@ -10,13 +10,18 @@ import sklearn
 import torch
 from matplotlib import pyplot as plt
 
-from taxonomy.utilities.data import Data, LoadSaveFile, Node
-from taxonomy.utilities.hyper_parameter import HyperParameters, HyperPrametersNode
+from taxonomy.utilities.data import LoadSaveFile
 from taxonomy.utilities.metrics import Metrics
-from taxonomy.utilities.model import ModelType
 from taxonomy.utilities.params import EvaluationMetricNames, ExperimentStageNames, TechniqueNames
-from taxonomy.utilities.settings import Settings
 from taxonomy.utilities.utils import node_type_checker
+
+if TYPE_CHECKING:
+	from taxonomy.utilities.settings import Settings
+	from taxonomy.utilities.model import ModelType
+	from taxonomy.utilities.hyperparameters import HyperParameters, HyperPrametersNode
+	from taxonomy.utilities.data import Node, Data
+
+
 
 USE_CUDA = torch.cuda.is_available()
 device = 'cuda' if USE_CUDA else 'cpu'
@@ -61,7 +66,7 @@ class ModelOutputs:
 					pred  = pd.DataFrame( columns=columns, index=index ))
 
 
-	def save(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
+	def save(self, config: 'Settings', experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
 
 		output_path = config.output.path / f'{experiment_stage}/model_outputs.xlsx'
 		output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,7 +79,7 @@ class ModelOutputs:
 		return self
 
 
-	def load(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
+	def load(self, config: 'Settings', experiment_stage: ExperimentStageNames) -> 'ModelOutputs':
 
 		input_path = config.output.path / f'{experiment_stage}/model_outputs.xlsx'
 
@@ -105,7 +110,7 @@ class ModelOutputs:
 
 @dataclass
 class FindingsNode:
-	config              : Settings
+	config              : 'Settings'
 	node                : Node
 	hyperparameters_node: HyperPrametersNode = None
 	model_outputs_node  : ModelOutputsNode   = None
@@ -114,8 +119,8 @@ class FindingsNode:
 @dataclass
 class Findings:
 	""" Class for storing overall findings including configuration, data, and metrics. """
-	config          : Settings
-	data            : Data = None
+	config          : 'Settings'
+	data            : 'Data' = None
 	model           : ModelType = None
 	model_outputs   : ModelOutputs = field(default = None, init = False)
 	metrics         : Metrics = field(default = None, init = False)
@@ -259,10 +264,10 @@ class FindingsAllTechniques:
 '''
 class TaxonomyXRV:
 
-	def __init__(self, config: Settings, seed: int=10):
+	def __init__(self, config: 'Settings', seed: int=10):
 
 		self.hyperparameters = None
-		self.config         : Settings                  = config
+		self.config         : 'Settings'                  = config
 		self.train          : Optional[Data]                      = None
 		self.test           : Optional[Data]                      = None
 		self.model          : Optional[torch.nn.Module]           = None
@@ -394,7 +399,7 @@ class TaxonomyXRV:
 
 	def get_metric(self, metric: EvaluationMetricNames=EvaluationMetricNames.AUC, data_mode: DataModes=DataModes.TRAIN) -> pd.DataFrame:
 
-		data: Data = self.train if data_mode == DataModes.TRAIN else self.test
+		data: 'Data' = self.train if data_mode == DataModes.TRAIN else self.test
 
 		column_names = data.labels.nodes.impacted
 
@@ -693,7 +698,7 @@ class Visualize:
 		self.config = get_settings(jupyter=jupyter, **kwargs)
 
 	@staticmethod
-	def plot_class_relationships(config: Settings, method: str = 'TSNE',
+	def plot_class_relationships(config: 'Settings', method: str = 'TSNE',
 	                             data_mode: DataModes = DataModes.TEST, feature_maps: Optional[np.ndarray] = None,
 	                             labels: pd.DataFrame = None) -> None:
 
@@ -807,7 +812,7 @@ class Visualize:
 
 
 	@staticmethod
-	def plot_metrics(config: Settings, metrics: pd.DataFrame, threshold_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
+	def plot_metrics(config: 'Settings', metrics: pd.DataFrame, threshold_technique: ThreshTechList , save_figure=True, figsize=(21, 7), font_scale=1.8, fontsize=20):
 
 
 		def save_plot():

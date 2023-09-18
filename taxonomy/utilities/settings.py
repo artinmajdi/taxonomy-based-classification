@@ -8,8 +8,7 @@ from typing import Any, TypeAlias, Union
 from pydantic import BaseModel, confloat, conint, Field, FieldValidationInfo
 from pydantic.functional_validators import field_validator
 
-from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, LossFunctionOptions, \
-	ModelWeightNames, ParentMetricToUseNames, SimulationOptions, TechniqueNames, ThreshTechList
+from taxonomy.utilities.params import DataModes, DatasetNames, EvaluationMetricNames, LossFunctionOptions, ModelWeightNames, ParentMetricToUseNames, SimulationOptions, TechniqueNames, ThreshTechList
 
 PathNoneType: TypeAlias = Union[pathlib.Path, None]
 
@@ -18,50 +17,68 @@ class DatasetInfo:
 	datasetName      : DatasetNames
 	path_all_datasets: pathlib.Path
 	views	         : list[str]
-	data_mode        : InitVar[DataModes] = None
-	path             : PathNoneType  	  = field(init=False)
-	csv_path         : PathNoneType		  = field(init=False)
-	metadata_path    : PathNoneType       = field(init=False)
-	params_config    : dict[str, Any]     = field(init=False)
+	USE_INCLUDED_FILE_IN_TORCHXRAYVISION: bool = True
+	data_mode        : InitVar[DataModes] = field(default=None)
+	path             : pathlib.Path  	  = field(default=None)
+	csv_path         : PathNoneType		  = field(default=None)
+	metadata_path    : PathNoneType       = field(default=None)
+	params_config    : dict[str, Any]     = field(default=None)
 
 	def __post_init__(self, data_mode: DataModes):
 
-		self.path          = self.resolve_path(self._get_dataset_relative_path(data_mode))
-		self.csv_path      = self.resolve_path(self._get_csv_relative_path(data_mode))
-		self.metadata_path = self.resolve_path(self._get_metadata_relative_path())
+		self.path = self._get_dataset_relative_path(data_mode)
+		self.params_config = {'imgpath':self.path, 'views':self.views}
 
-		self.params_config = {'imgpath':self.path, 'views':self.views, 'csvpath':self.csv_path, 'metacsvpath':self.metadata_path}
+		if self.datasetName == DatasetNames.MIMIC:
+			self.metadata_path = self.resolve_path('MIMIC/mimic-cxr-2.0.0-metadata.csv.gz')
+			self.csv_path 	   = self.resolve_path('MIMIC/mimic-cxr-2.0.0-chexpert.csv.gz')
 
-	def resolve_path(self, base_path: PathNoneType) -> PathNoneType:
-		return self.path_all_datasets / base_path if base_path is not None else None
+			self.params_config['csvpath']     = self.csv_path,
+			self.params_config['metacsvpath'] = self.metadata_path
 
-	def _get_dataset_relative_path(self, data_mode: DataModes=None):
+		else:
+
+			# Returning USE_INCLUDED_FILE if USE_INCLUDED_FILE_IN_TORCHXRAYVISION is True else False
+			from torchxrayvision.datasets import USE_INCLUDED_FILE
+			doUFI = self.USE_INCLUDED_FILE_IN_TORCHXRAYVISION and USE_INCLUDED_FILE
+
+			# Updating the bbox list path
+			if self.datasetName == DatasetNames.NIH:
+				self.params_config['bbox_list_path'] = doUFI or self.resolve_path('NIH/BBox_List_2017.csv')
+
+			# Updating the csv path
+			self.csv_path = doUFI or self._get_relative_csv_path(data_mode)
+
+			self.params_config['csvpath'] = self.csv_path
+
+
+	def resolve_path(self, base_path: Union[str, None]) -> Union[pathlib.Path, None]:
+		return base_path and self.path_all_datasets / pathlib.Path(base_path)
+
+	def _get_relative_csv_path(self, data_mode: DataModes) -> pathlib.Path:
+		csv_path_dict = {
+				'nih'     : 'NIH/Data_Entry_2017.csv',
+				'rsna'    : 'RSNA/stage_2_train_labels,csv',
+				'pc'      : 'PC/PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv',
+				'chex'    : 'CheX/CheXpert-v1.0-small/{data_mode.value}.csv',
+				'vinbrain': f'VinBrain/dicom/{data_mode.value}.csv',
+				}
+		return self.resolve_path( csv_path_dict.get(self.datasetName.value) )
+
+
+	def _get_dataset_relative_path(self, data_mode: DataModes) -> pathlib.Path:
 		dataset_path_dict = {
 				'nih'     : 'NIH/images-224',
 				'rsna'    : 'RSNA/images-224',
 				'pc'      : 'PC/images-224',
 				'chex'    : 'CheX/CheXpert-v1.0-small',
-				'mimic'   : 'MIMIC/re_512_3ch',
 				'openai'  : 'Openi/NLMCXR_png',
-				'vinbrain': f'VinBrain/{data_mode.value}'
+				'vinbrain': f'VinBrain/{data_mode.value}',
+				'mimic'   : 'MIMIC/re_512_3ch'
 				}
-		return dataset_path_dict.get(self.datasetName.value)
+		return self.resolve_path( dataset_path_dict.get(self.datasetName.value) )
 
-	def _get_csv_relative_path(self, data_mode: DataModes=None):
-		csv_path_dict = {
-				'nih'     : 'NIH/Data_Entry_2017.csv',
-				'rsna'    : None,
-				'pc'      : 'PC/PADCHEST_chest_x_ray_images_labels_160K_01.02.19.csv',
-				'chex'    : f'CheX/CheXpert-v1.0-small/{data_mode.value}.csv',
-				'mimic'   : 'MIMIC/mimic-cxr-2.0.0-chexpert.csv.gz',
-				'openai'  : 'Openi/nlmcxr_dicom_metadata.csv',
-				'vinbrain': f'VinBrain/dicom/{data_mode.value}.csv',
-				}
-		return csv_path_dict.get(self.datasetName.value)
 
-	def _get_metadata_relative_path(self):
-		meta_data_dict = {'mimi': 'MIMIC/mimic-cxr-2.0.0-metadata.csv.gz'}
-		return meta_data_dict.get(self.datasetName.value)
 
 class DatasetSettings(BaseModel):
 	data_mode        : DataModes          = DataModes.TRAIN
@@ -155,7 +172,7 @@ class Settings(BaseModel):
 		str_strip_whitespace = True
 
 
-def get_settings(argv=None, jupyter=True, config_path='config.json') -> Settings:
+def get_settings(argv=None, jupyter=True, config_path='config.json') -> 'Settings':
 
 	def parse_args() -> dict:
 		"""	Getting the arguments from the command line

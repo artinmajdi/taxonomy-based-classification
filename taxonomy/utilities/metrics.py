@@ -80,7 +80,7 @@ class MetricsNode:
 	THRESHOLD: float = None
 
 	@classmethod
-	def calculate(cls, y: Union[np.ndarray, pd.Series], yhat: Union[np.ndarray, pd.Series], node: Node, config: Settings) -> 'MetricsNode':
+	def calculate(cls, y: Union[np.ndarray, pd.Series], yhat: Union[np.ndarray, pd.Series], node: Node, config: 'Settings') -> 'MetricsNode':
 		return CalculateMetricsNode( y=y, yhat=yhat, config=config, node=node).get_all
 
 
@@ -98,7 +98,7 @@ class Metrics:
 					F1  = pd.Series( index=classes ),
 					THRESHOLD = pd.Series( index=classes ) )
 
-	def save(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'Metrics':
+	def save(self, config: 'Settings', experiment_stage: ExperimentStageNames) -> 'Metrics':
 
 		def get_formatted(metric):
 			return metric if isinstance(metric, pd.Series) else pd.Series([metric])
@@ -113,7 +113,7 @@ class Metrics:
 			get_formatted(self.THRESHOLD).to_excel( writer, sheet_name = 'threshold' )
 		return self
 
-	def load(self, config: Settings, experiment_stage: ExperimentStageNames) -> 'Metrics':
+	def load(self, config: 'Settings', experiment_stage: ExperimentStageNames) -> 'Metrics':
 
 		def set_formatted(metric):
 			if isinstance(metric, pd.Series) and len(metric) == 1:
@@ -144,7 +144,7 @@ class Metrics:
 		self.THRESHOLD[node] = value.THRESHOLD
 
 	@classmethod
-	def calculate(cls, config: Settings, **kwargs) -> 'Metrics':
+	def calculate(cls, config: 'Settings', **kwargs) -> 'Metrics':
 
 		if not set(kwargs.keys()).intersection({'truth', 'pred', 'model_outputs'}):
 			raise ValueError("Either truth, pred or model_outputs must be passed")

@@ -1,17 +1,18 @@
 from dataclasses import dataclass
-from typing import Tuple, TypeAlias, Union
+from typing import TypeAlias, Union, TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
 import torch
+import torchxrayvision as xrv
 from tqdm import tqdm
 
-import torchxrayvision as xrv
-from taxonomy.utilities.data import Data, DataTrainTest
 from taxonomy.utilities.params import DataModes, ModelWeightNames
-from taxonomy.utilities.settings import Settings
-from taxonomy.utilities.utils import USE_CUDA, device
+from taxonomy.utilities.utils import USE_CUDA
 
+if TYPE_CHECKING:
+	from taxonomy.utilities.settings import Settings
+	from taxonomy.utilities.data import Data, DataTrainTest
 
 @dataclass
 class LossFunctionOptions:
@@ -25,8 +26,8 @@ ModelType: TypeAlias = Union[xrv.models.DenseNet, xrv.models.ResNet]
 
 @dataclass
 class LoadModelXRV:
-	config: Settings
-	model : ModelType = None
+	config: 'Settings'
+	model : 'ModelType' = None
 
 	def load(self, op_threshes: bool=False) -> 'LoadModelXRV':
 
@@ -59,19 +60,19 @@ class LoadModelXRV:
 		return self
 
 	@staticmethod
-	def model_classes(config: Settings) -> list:
+	def model_classes(config: 'Settings') -> list:
 		return xrv.models.model_urls[config.modelName]['labels']
 
 	@classmethod
-	def extract_feature_maps(cls, config: Settings, data_mode: DataModes) -> tuple[np.ndarray, pd.DataFrame, list]:
+	def extract_feature_maps(cls, config: 'Settings', data_mode: DataModes) -> tuple[np.ndarray, pd.DataFrame, list]:
 
-		def _get_data() -> Data:
+		def _get_data() -> 'Data':
 			from taxonomy.utilities.data import LoadChestXrayDatasets
-			LD: DataTrainTest = LoadChestXrayDatasets.load( config=config )
+			LD: 'DataTrainTest' = LoadChestXrayDatasets.load( config=config )
 			return LD.train if data_mode is DataModes.TRAIN else LD.test
 
 		model: ModelType = cls(config = config).load().model
-		data: Data = _get_data()
+		data: 'Data' = _get_data()
 
 		def process_one_batch(batch_data) -> tuple[np.ndarray, np.ndarray]:
 

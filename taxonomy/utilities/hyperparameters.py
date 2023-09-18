@@ -1,17 +1,18 @@
 from __future__ import annotations, annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Union
+from typing import Any, Union, TYPE_CHECKING
 
 import pandas as pd
 from hyperopt import fmin, hp, tpe
 
-from taxonomy.utilities.calculate import UpdateModelOutputs_wrt_Hyperparameters_Node
-from taxonomy.utilities.data import Node
-from taxonomy.utilities.findings import Findings
 from taxonomy.utilities.params import TechniqueNames
-from taxonomy.utilities.settings import Settings
 from taxonomy.utilities.utils import node_type_checker
+
+if TYPE_CHECKING:
+	from taxonomy.utilities.data import Node
+	from taxonomy.utilities.findings import Findings
+	from taxonomy.utilities.settings import Settings
 
 
 @dataclass
@@ -26,7 +27,7 @@ class HyperParameters:
 	ADDITIVE  : pd.Series = field(default_factory = pd.Series)
 
 	@classmethod
-	def initialize(cls, config: Settings=None, classes: Any=None) -> 'HyperParameters':
+	def initialize(cls, config: 'Settings'=None, classes: Any=None) -> 'HyperParameters':
 
 		logit      = config.technique.technique_name == TechniqueNames.LOGIT
 		MULTIPLIER = pd.Series( 0.0 if logit else 1.0, index=classes)
@@ -36,14 +37,16 @@ class HyperParameters:
 
 
 	@staticmethod
-	def objective_function(findings_original: Findings, node: Node):
+	def objective_function(findings_original: 'Findings', node: 'Node'):
 
-		params = {'config'			: findings_original.config,
-				  'node'  			: node,
-				  'data_node'       : findings_original.model_outputs[node],
-				  'data_parent'     : findings_original.model_outputs[node.parent],
-				  'THRESHOLD_node'  : findings_original.metrics.THRESHOLD[node],
-				  'THRESHOLD_parent': findings_original.metrics.THRESHOLD[node.parent]}
+		from taxonomy.utilities.calculate import UpdateModelOutputs_wrt_Hyperparameters_Node
+
+		params = {  'config'		  : findings_original.config,
+					'node'  		  : node,
+					'data_node'       : findings_original.model_outputs[node],
+					'data_parent'     : findings_original.model_outputs[node.parent],
+					'THRESHOLD_node'  : findings_original.metrics.THRESHOLD[node],
+					'THRESHOLD_parent': findings_original.metrics.THRESHOLD[node.parent]}
 
 		CNF = UpdateModelOutputs_wrt_Hyperparameters_Node( **params )
 
@@ -52,9 +55,9 @@ class HyperParameters:
 		return optimizer
 
 
-	def calculate_for_node(self, findings_original: Findings, node: Node) -> HyperPrametersNode:
+	def calculate_for_node(self, findings_original: 'Findings', node: 'Node') -> HyperPrametersNode:
 
-		config: Settings = findings_original.config
+		config: 'Settings' = findings_original.config
 
 		search_space_multiplier = config.hyperparameter_tuning.search_space_multiplier
 		search_space_additive   = config.hyperparameter_tuning.search_space_additive
@@ -75,7 +78,7 @@ class HyperParameters:
 
 
 	@classmethod
-	def calculate(cls, findings_original: Findings) -> 'HyperParameters':
+	def calculate(cls, findings_original: 'Findings') -> 'HyperParameters':
 
 		# Initializing the hyperparameters
 		HP = cls.initialize( config  = findings_original.config,
@@ -102,7 +105,7 @@ class HyperParameters:
 '''
 @dataclass
 class HyperParameterTuning:
-	findings_original: Findings
+	findings_original: 'Findings'
 
 	@staticmethod
 	def calculate(initial_hp, config, data):  # type: (Dict[str, pd.DataFrame], Settings, Data) -> Dict[str, pd.DataFrame]
