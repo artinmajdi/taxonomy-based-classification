@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../../../Datasets/ChestXray"
+		}
+	],
+	"settings": {
+		"hide-files.files": [],
+		"sourcery.token": "user_aBuBVMBF3DghAk_V_uthXmICrFTlmxBlsaB7vqFF2Qvdg0rb5m_wVJ6EiSo"
+	}
+}
