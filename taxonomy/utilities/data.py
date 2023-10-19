@@ -158,6 +158,7 @@ class DataTrainTest:
 	train: 'Data' = field(default=None)
 	test : 'Data' = field(default=None)
 
+
 @dataclass
 class LoadChestXrayDatasets:
 	config     : 'Settings'
